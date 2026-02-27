@@ -1,0 +1,117 @@
+% Diffusion Models for TSP — 最终项目报告
+% 海德堡大学 GNNs 课程 2025/26 冬季学期
+% 注意: 封面禁止使用大学/机构 Logo！
+
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[english]{babel}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{subcaption}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{natbib}
+
+\title{Diffusion Models for Combinatorial Optimization: \\
+       Solving TSP via Generative Modeling}
+\author{
+  % TODO: 填写姓名和学号
+  Name1 (Matrikelnummer1)
+  \and
+  Name2 (Matrikelnummer2)
+}
+\date{March 2026 \\[1em]
+  Code: \url{https://github.com/xxx/tsp-diffusion} % TODO: 替换为实际仓库链接
+}
+
+\begin{document}
+
+\maketitle
+
+% ============================================================
+\begin{abstract}
+% ~250 字 | 作者: 共同
+% TODO: 问题 + 方法 + 结果 + 贡献
+\end{abstract}
+
+% ============================================================
+\section{Introduction} % ~800 字 | 作者: TODO
+\textit{[Primary Author: TODO]}
+
+% TODO: TSP 难度 + LKH 局限 + 扩散模型动机 + 本文贡献列表
+
+% ============================================================
+\section{Background} % ~1200 字 | 作者: TODO
+\textit{[Primary Author: TODO]}
+
+\subsection{Travelling Salesman Problem}
+% TODO: TSP 形式化定义
+
+\subsection{Denoising Diffusion Probabilistic Models}
+% TODO: DDPM 前向/逆向公式
+
+\subsection{Related Work}
+% TODO: DIFUSCO, T2T-CO, Attention Model 综述
+
+% ============================================================
+\section{Method} % ~1500 字 | 作者: 共同
+\textit{[Primary Author: Joint]}
+
+\subsection{Architecture Overview}
+% TODO: 架构图 (GNN Encoder + Diffusion Decoder)
+
+\subsection{GNN Encoder}
+% TODO: Gated GCN / GAT / GCN 公式
+
+\subsection{Categorical Diffusion}
+% TODO: 离散扩散过程公式
+
+\subsection{Decoding}
+% TODO: Greedy / Beam Search / 2-opt 算法描述
+
+\subsection{Hyperparameters}
+% TODO: 超参数表
+
+\subsection{Deviations from Original Plan}
+% TODO: 课程要求! 规划 vs 实际偏差
+
+% ============================================================
+\section{Experiments} % ~2000 字 | 作者: 共同
+\textit{[Primary Author: Joint]}
+
+\subsection{Training Convergence}
+% TODO: Loss 曲线图
+
+\subsection{Ablation: GNN Architecture}
+% TODO: 消融实验表格 (Gated GCN / GAT / GCN)
+
+\subsection{Generalization Across Scales}
+% TODO: TSP-20/50/100 泛化曲线
+
+\subsection{Diffusion Process Visualization}
+% TODO: GIF 截图 + 热力图
+
+% ============================================================
+\section{Conclusion} % ~500 字 | 作者: 共同
+\textit{[Primary Author: Joint]}
+
+% TODO: 回答研究问题 + 局限性 + 未来工作
+
+% ============================================================
+\bibliographystyle{plainnat}
+% \bibliography{refs}  % TODO: 创建 refs.bib
+
+% 临时手动引用
+\begin{thebibliography}{9}
+\bibitem{ho2020ddpm} Ho, J., Jain, A., \& Abbeel, P. (2020). Denoising Diffusion Probabilistic Models. \textit{NeurIPS}.
+\bibitem{sun2023difusco} Sun, Z. et al. (2023). DIFUSCO: Graph-based Diffusion Solvers for Combinatorial Optimization. \textit{NeurIPS}.
+\bibitem{chen2024t2tco} Chen, T. et al. (2024). Fast T2T: Optimization Consistency Speeds Up Diffusion-Based Training for Graph Generation. \textit{NeurIPS}.
+\bibitem{velickovic2018gat} Veli\v{c}kovi\'{c}, P. et al. (2018). Graph Attention Networks. \textit{ICLR}.
+\bibitem{kool2019attention} Kool, W. et al. (2019). Attention, Learn to Solve Routing Problems! \textit{ICLR}.
+\end{thebibliography}
+
+\end{document}
