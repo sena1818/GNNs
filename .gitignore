@@ -32,6 +32,10 @@ fix_headers.py
 fix_notebook.py
 /data/
 CLAUDE.md
+sheet/
+T0/
+T1_generative/
+T2_probabilistic/
 
 # final_project 相关
 final_project/refs/
