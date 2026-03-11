@@ -24,6 +24,7 @@
 | 论文 | 作者 | 会议 | 链接 |
 |------|------|------|------|
 | **Denoising Diffusion Probabilistic Models (DDPM)** | Ho, Jain, Abbeel | NeurIPS 2020 | https://arxiv.org/abs/2006.11239 |
+| **Flow Matching for Generative Modeling** | Lipman et al. | ICLR 2023 | https://arxiv.org/abs/2210.02747 |
 | **DIFUSCO** | Sun et al. | NeurIPS 2023 | https://arxiv.org/abs/2303.18138 |
 | **T2T-CO (Fast T2T)** | Chen et al. | NeurIPS 2024 | https://github.com/Thinklab-SJTU/T2TCO |
 | **Graph Attention Networks (GAT)** | Veličković et al. | ICLR 2018 | https://arxiv.org/abs/1710.10903 |
@@ -74,6 +75,14 @@ sheet/final_project/
   - 逆向去噪：学习 `p_θ(x_{t-1} | x_t)`
   - 理解为什么能直接预测 `x_0`（DIFUSCO 用的是直接预测 x_0 而非 ε）
   - 重点：搞懂"每步去噪是一个分类/回归问题"
+
+### P0-E：Flow Matching 理论（1h，两人都读）
+- [ ] 读 **Flow Matching for Generative Modeling**（Lipman et al. — ICLR 2023）：https://arxiv.org/abs/2210.02747
+  - 核心公式：插值路径 `X_t = (1-t)·X_0 + t·ε`，速度场 `v* = ε - X_0`
+  - 损失函数：`L = E[ ||v_θ(X_t, t) - (ε - X_0)||² ]`
+  - 推理：从 `X_1 ~ N(0,I)` 积分 ODE 到 `X_0`，仅需 10-20 欧拉步
+  - 理解：为什么 straight-line ODE 比 SDE（DDPM）收敛更快？
+  - 关键洞见：DIFUSCO 的连续高斯扩散空间 ℝ^(N×N) 完全满足 FM 的要求，可无缝替换
 
 ### P0-B：DIFUSCO 论文（5h，重点是 Section 3）
 - [ ] 读 DIFUSCO（NeurIPS 2023）：https://arxiv.org/abs/2303.18138
@@ -234,38 +243,61 @@ python data/generate_tsp_data.py --num_nodes 100 --num_samples 1000 --output_fil
   out = encoder(coords, adj_noisy, t)  # 期望输出 (2, 20, 20)
   ```
 
-### P3-2：扩散调度器（`models/diffusion_schedulers.py`）
-- [ ] 直接复制 DIFUSCO 的 `difusco/utils/diffusion_schedulers.py`（几乎不需要修改）
-- [ ] 理解并注释以下关键函数：
-  - `CategoricalDiffusion.sample(x0, t)`：x0 加噪 → x_t
-  - `InferenceSchedule.__iter__()`：生成推理时间步序列（T → 0）
+### P3-2：Flow Matching 调度器（`models/diffusion_schedulers.py`）
+- [ ] 实现 `FlowMatchingScheduler`（替代 DIFUSCO 的 `CategoricalDiffusion`）：
+  ```python
+  class FlowMatchingScheduler:
+      def interpolate(self, x0, epsilon, t):
+          # X_t = (1 - t) * x0 + t * epsilon
+          # t: scalar or (B,) tensor, x0/epsilon: (B, N, N)
+          return (1 - t) * x0 + t * epsilon
+
+      def get_velocity_target(self, x0, epsilon):
+          # v* = epsilon - x0  (恒定速度场)
+          return epsilon - x0
+  ```
+- [ ] 保留 `InferenceSchedule`（推理时间步序列，t 从 1.0 递减到 0.0）：
+  ```python
+  class InferenceSchedule:
+      def __init__(self, inference_steps=20):
+          self.steps = inference_steps
+
+      def __iter__(self):
+          # 生成 t = 1.0, 0.95, 0.90, ..., 0.05, 0.0
+          dt = 1.0 / self.steps
+          for i in range(self.steps):
+              t = 1.0 - i * dt
+              yield t, dt
+  ```
+- [ ] 注意：不再需要 beta schedule，不需要 alpha_bar，损失改为 MSE（而非 BCE）
 
 ### P3-3：主模型（`models/tsp_model.py`）
 - [ ] 基于 DIFUSCO 的 `pl_tsp_model.py` 大幅简化（去掉 Lightning，用纯 PyTorch）：
   ```python
-  class TSPDiffusionModel(nn.Module):
-      def __init__(self, n_layers=4, hidden_dim=128, diffusion_steps=1000):
-          self.encoder = GNNEncoder(n_layers, hidden_dim)
-          self.diffusion = CategoricalDiffusion(diffusion_steps)
+  class TSPFlowMatchingModel(nn.Module):
+      def __init__(self, n_layers=4, hidden_dim=128, inference_steps=20):
+          self.encoder = GNNEncoder(n_layers, hidden_dim)  # 预测速度场 v_θ
+          self.scheduler = FlowMatchingScheduler()
 
       def forward(self, coords, adj_t, t):
-          # 给定带噪邻接矩阵和时间步，预测原始邻接矩阵 adj_0
+          # 给定插值状态和时间步，预测速度场 v_θ(A_t, t, coords)
           return self.encoder(coords, adj_t, t)
 
       def compute_loss(self, coords, adj_0):
-          # 1. 采样时间步 t ~ Uniform(1, T)
-          # 2. 加噪：adj_t = diffusion.sample(adj_0, t)
-          # 3. 前向：pred_adj_0 = self.forward(coords, adj_t, t)
-          # 4. 损失：BCE(pred_adj_0, adj_0)
+          # 1. 采样时间步 t ~ Uniform(0, 1)
+          # 2. 采样噪声 epsilon ~ N(0, I)
+          # 3. 插值：adj_t = scheduler.interpolate(adj_0, epsilon, t)
+          # 4. 前向：pred_velocity = self.forward(coords, adj_t, t)
+          # 5. 损失：MSE(pred_velocity, epsilon - adj_0)
           return loss
 
       @torch.no_grad()
-      def denoise(self, coords, inference_steps=50):
-          # 从纯噪声开始，逐步去噪，返回概率热力图
-          # 使用 InferenceSchedule 生成时间步序列
-          return heatmap  # shape: (N, N)
+      def sample(self, coords, inference_steps=20):
+          # 从纯噪声 X_1 ~ N(0,I) 开始，用欧拉法积分到 X_0
+          # X_{t-dt} = X_t - dt * v_θ(X_t, t, coords)
+          return heatmap  # shape: (N, N), values in [0,1]
   ```
-- [ ] 验证：随机初始化时 loss ≈ ln(2) ≈ 0.693
+- [ ] 验证：随机初始化时 MSE loss ≈ 1.0（随机速度预测的 L2 误差）
 
 ### P3-4：训练脚本（`train.py`）
 - [ ] 完整训练循环：

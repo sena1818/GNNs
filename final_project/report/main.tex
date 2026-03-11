@@ -54,6 +54,34 @@
 \subsection{Denoising Diffusion Probabilistic Models}
 % TODO: DDPM 前向/逆向公式
 
+\subsection{Flow Matching}
+Flow Matching~\cite{lipman2022flow} provides an elegant alternative to DDPM by defining a
+\emph{deterministic} probability flow between distributions.
+Given data $\mathbf{X}_0$ and noise $\boldsymbol{\epsilon} \sim \mathcal{N}(\mathbf{0}, \mathbf{I})$,
+the interpolation path is a straight line:
+\begin{equation}
+  \mathbf{X}_t = (1 - t)\,\mathbf{X}_0 + t\,\boldsymbol{\epsilon}, \quad t \in [0, 1]
+  \label{eq:fm_interp}
+\end{equation}
+The velocity field along this path is constant:
+\begin{equation}
+  \mathbf{v}^*(\mathbf{X}_t, t) = \boldsymbol{\epsilon} - \mathbf{X}_0
+  \label{eq:fm_velocity}
+\end{equation}
+A neural network $v_\theta$ is trained with a simple regression loss:
+\begin{equation}
+  \mathcal{L}_\text{FM} = \mathbb{E}_{t \sim \mathcal{U}[0,1],\,\mathbf{X}_0,\,\boldsymbol{\epsilon}}
+  \left[\left\|v_\theta(\mathbf{X}_t, t) - (\boldsymbol{\epsilon} - \mathbf{X}_0)\right\|^2\right]
+  \label{eq:fm_loss}
+\end{equation}
+During inference, we integrate the learned ODE from $t=1$ (noise) backward to $t=0$ (data)
+using the Euler method with $K$ steps, requiring only $K = 10\text{--}20$ function evaluations
+compared to DDPM's 50--1000 steps.
+This straight-line formulation is particularly advantageous for graph-structured data:
+unlike DDPM's Brownian-motion-based SDE, the deterministic linear interpolation preserves
+the sparse topological structure of the adjacency matrix throughout the trajectory,
+giving the GNN a cleaner and more stable learning signal.
+
 \subsection{Related Work}
 % TODO: DIFUSCO, T2T-CO, Attention Model 综述
 
@@ -67,10 +95,48 @@
 \subsection{GNN Encoder}
 % TODO: Gated GCN / GAT / GCN 公式
 
-\subsection{Categorical Diffusion}
-% TODO: 离散扩散过程公式
+\subsection{Flow Matching for TSP}
+\label{sec:fm_tsp}
+
+\subsubsection{Continuous Relaxation}
+The ground-truth TSP adjacency matrix $\mathbf{X}_0 \in \{0,1\}^{N \times N}$ is a discrete
+object: each entry is 1 if the corresponding edge belongs to the optimal tour and 0 otherwise.
+Discrete diffusion over such binary matrices is notoriously unstable and typically
+underperforms its continuous counterpart~\cite{sun2023difusco}.
+We therefore apply a \emph{continuous relaxation}: $\mathbf{X}_0$ is treated as an ordinary
+real-valued tensor in $\mathbb{R}^{N \times N}$ — a vertex of the unit hypercube embedded in
+continuous space. This makes all continuous-space generative methods directly applicable.
+
+\subsubsection{Forward Path and Training Objective}
+We construct a straight-line interpolation between $\mathbf{X}_0$ and Gaussian noise
+$\boldsymbol{\epsilon} \sim \mathcal{N}(\mathbf{0}, \mathbf{I})$:
+\begin{equation}
+  \mathbf{X}_t = (1 - t)\,\mathbf{X}_0 + t\,\boldsymbol{\epsilon}, \quad t \sim \mathcal{U}[0,1]
+\end{equation}
+The GNN velocity network $v_\theta(\mathbf{X}_t,\, t,\, \mathbf{C})$, conditioned on city
+coordinates $\mathbf{C} \in \mathbb{R}^{N \times 2}$, is trained to predict the constant
+target velocity $\boldsymbol{\epsilon} - \mathbf{X}_0$:
+\begin{equation}
+  \mathcal{L} = \mathbb{E}_{t,\,\mathbf{X}_0,\,\boldsymbol{\epsilon}}
+  \left[\left\|v_\theta(\mathbf{X}_t,\, t,\, \mathbf{C})
+        - (\boldsymbol{\epsilon} - \mathbf{X}_0)\right\|^2\right]
+\end{equation}
+This is a standard MSE regression objective over a linearly interpolated trajectory.
+
+\subsubsection{Inference via Euler Integration}
+Starting from $\mathbf{X}_1 \sim \mathcal{N}(\mathbf{0}, \mathbf{I})$, we integrate the
+learned ODE backward from $t = 1$ to $t = 0$ using $K = 20$ Euler steps with step size
+$\Delta t = 1/K$:
+\begin{equation}
+  \mathbf{X}_{t - \Delta t} = \mathbf{X}_t
+    - \Delta t \cdot v_\theta\!\left(\mathbf{X}_t,\, t,\, \mathbf{C}\right)
+\end{equation}
+The final output $\hat{\mathbf{X}}_0 \in \mathbb{R}^{N \times N}$ is passed through a sigmoid
+to obtain a probability heatmap $\hat{\mathbf{P}} \in [0,1]^{N \times N}$, which is then
+decoded into a valid TSP tour (Section~\ref{sec:decoding}).
 
 \subsection{Decoding}
+\label{sec:decoding}
 % TODO: Greedy / Beam Search / 2-opt 算法描述
 
 \subsection{Hyperparameters}
@@ -112,6 +178,7 @@
 \bibitem{chen2024t2tco} Chen, T. et al. (2024). Fast T2T: Optimization Consistency Speeds Up Diffusion-Based Training for Graph Generation. \textit{NeurIPS}.
 \bibitem{velickovic2018gat} Veli\v{c}kovi\'{c}, P. et al. (2018). Graph Attention Networks. \textit{ICLR}.
 \bibitem{kool2019attention} Kool, W. et al. (2019). Attention, Learn to Solve Routing Problems! \textit{ICLR}.
+\bibitem{lipman2022flow} Lipman, Y., Chen, R. T. Q., Ben-Hamu, H., Nickel, M., \& Le, M. (2022). Flow Matching for Generative Modeling. \textit{ICLR 2023}.
 \end{thebibliography}
 
 \end{document}

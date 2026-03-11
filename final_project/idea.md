@@ -11,20 +11,21 @@
 **Core Papers**:
 - **T2T-CO** (Chen et al., NeurIPS 2024): Anisotropic GNN + diffusion achieving 0.3% optimality gap on TSP-100 (SOTA), but high computational cost with Graph Transformer
 - **DIFUSCO** (Sun et al., NeurIPS 2023): First TSP diffusion framework with complex discrete decoding
+- **Flow Matching for Generative Modeling** (Lipman et al., ICLR 2023): Deterministic ODE-based generative framework replacing stochastic SDE; straight-line probability paths enable 10× fewer inference steps
 - **LKH Algorithm** (Helsgaun 2017): Near-optimal but slow (hours for TSP-10000), no learning capability
 - **Attention Model** (Kool et al., ICLR 2019): RL end-to-end with poor generalization (TSP-50→100 gap > 10%)
 
-**Our Extensions**: 
-(1) Lightweight architecture ablation comparing Graph Transformer vs. GAT vs. GCN for efficiency-performance tradeoffs; 
-(2) Cross-scale generalization testing (TSP-50 training → TSP-20/100/200 testing, target: TSP-100 gap < 2%); 
-(3) Multi-modal diffusion generating 10 diverse high-quality paths; 
-(4) Hybrid solver combining diffusion initialization with 2-opt local refinement.
+**Our Extensions**:
+(1) Lightweight architecture ablation comparing Graph Transformer vs. GAT vs. GCN for efficiency-performance tradeoffs;
+(2) Cross-scale generalization testing (TSP-50 training → TSP-20/100/200 testing, target: TSP-100 gap < 2%);
+(3) Multi-modal generation producing 10 diverse high-quality paths;
+(4) **Flow Matching replacing DDPM**: Both DIFUSCO and T2T-CO use continuous Gaussian diffusion on a continuous relaxation of the {0,1} adjacency matrix. We replace the stochastic SDE with a deterministic straight-line ODE (Conditional Flow Matching), reducing inference steps from 50 → 10–20 while maintaining solution quality.
 
 ## 3. Methodology and Feasibility
 
 **Technical Roadmap**: 
 (1) **Infrastructure setup**: Configure PyTorch Geometric and PyConcorde, generate multi-scale TSP instances (TSP-20: 1000, TSP-50: 5000) with LKH-computed optimal solutions; 
-(2) **Core model implementation**: Anisotropic graph convolution encoder (4 layers) with separate weight matrices for in/out edges, U-Net diffusion decoder predicting denoising trajectory for adjacency matrix A ∈ {0,1}^(N×N), forward noising q(A_t|A_0) and reverse denoising with direct x₀ prediction; 
+(2) **Core model implementation**: Anisotropic graph convolution encoder (4 layers) with separate weight matrices for in/out edges. We apply a **continuous relaxation** treating A ∈ {0,1}^(N×N) as a tensor in ℝ^(N×N), then use **Conditional Flow Matching**: forward path A_t = (1−t)A₀ + tε (ε ~ N(0,I)), velocity target v* = ε − A₀, MSE loss ‖v_θ(A_t, t) − (ε − A₀)‖². Inference integrates the ODE from A₁ ~ N(0,I) back to A₀ using ~20 Euler steps; 
 (3) **Extension experiments**: Architecture ablation (Graph Transformer/GAT/GCN), cross-scale generalization (TSP-50 training → TSP-20/100/200 testing), decoding strategy optimization (beam search k=10, greedy, temperature sampling), multi-modal generation (10-choose-1 strategy), hybrid solver (diffusion + 2-opt); 
 (4) **Evaluation**: Quantitative metrics (optimality gap, inference time, success rate) and visualization (diffusion process GIF, edge probability heatmap, path comparison).
 
@@ -389,7 +390,8 @@ N×N矩阵，颜色越深表示连接概率越高
 1. ✅ **首次系统测试轻量化架构**（GAT vs Transformer）
 2. ✅ **首次分析扩散TSP的跨规模泛化能力**
 3. ✅ **实时TSP求解**（Greedy解码 < 0.1秒）
-4. ✅ **震撼的可视化**（扩散动画GIF）
+4. ✅ **震撼的可视化**（扩散/流匹配动画GIF）
+5. ✅ **Flow Matching 替代 DDPM**：将连续高斯扩散改造为直线 ODE，推理步数 50 → 10–20，对 GNN 更友好（无随机游走导致的图结构扰动）
 
 ---
 

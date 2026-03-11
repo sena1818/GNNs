@@ -60,7 +60,7 @@ sheet/final_project/
 | 文件 | 需要实现的内容 | 参考来源 | 优先级 |
 |------|--------------|---------|--------|
 | **gnn_encoder.py** | `GNNLayer` 门控图卷积层 + `GNNEncoder` 多层编码器 + 位置编码 + 时间步嵌入 | `refs/DIFUSCO/difusco/models/gnn_encoder.py` | ⭐⭐⭐ |
-| **diffusion_schedulers.py** | `CategoricalDiffusion` 离散扩散 (前向加噪/逆向去噪) + `InferenceSchedule` 推理时间步 | `refs/DIFUSCO/difusco/utils/diffusion_schedulers.py` | ⭐⭐⭐ |
+| **diffusion_schedulers.py** | `FlowMatchingScheduler` 直线插值 (`interpolate`) + 速度目标 (`get_velocity_target`) + `InferenceSchedule` 推理时间步 (t: 1.0→0.0, 20步欧拉积分) | 自行实现（Lipman et al. 2022，无需参考 DIFUSCO 的 CategoricalDiffusion） | ⭐⭐⭐ |
 | **tsp_model.py** | `TSPDiffusionModel` 组合编码器+扩散 + `compute_loss` + `denoise` 推理 | `refs/DIFUSCO/difusco/pl_tsp_model.py` (去掉Lightning) | ⭐⭐⭐ |
 | **tsp_dataset.py** | `TSPDataset(Dataset)` 读取txt数据 → 返回 coords/adj_matrix/tour | `refs/DIFUSCO/difusco/co_datasets/tsp_graph_dataset.py` | ⭐⭐⭐ |
 
@@ -136,8 +136,7 @@ sheet/final_project/
 | weight_decay | 1e-4 | — |
 | epochs | 50 | — |
 | warmup_steps | 1000 | — |
-| diffusion_steps | 1000 | 训练时 |
-| inference_steps | 50 | 推理时加速 |
+| inference_steps | 20 | 推理欧拉积分步数（Flow Matching，替代 DDPM 的 50-1000） |
 | n_layers | 4 | GNN 层数 |
 | hidden_dim | 128 | — |
 | ema_decay | 0.999 | — |
