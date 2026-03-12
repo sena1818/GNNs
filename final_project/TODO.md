@@ -73,7 +73,7 @@ sheet/final_project/
 - [ ] 读 **DDPM**（Ho, Jain, Abbeel — NeurIPS 2020）：https://arxiv.org/abs/2006.11239
   - Section 2-3：前向加噪 `q(x_t | x_{t-1}) = N(√(1-β_t)·x_{t-1}, β_t·I)`
   - 逆向去噪：学习 `p_θ(x_{t-1} | x_t)`
-  - 理解为什么能直接预测 `x_0`（DIFUSCO 用的是直接预测 x_0 而非 ε）
+  - 理解 ε-prediction vs x₀-prediction 的区别（DIFUSCO 离散变体预测 x₀ logits + CrossEntropyLoss，连续高斯变体预测 ε + MSE loss）
   - 重点：搞懂"每步去噪是一个分类/回归问题"
 
 ### P0-E：Flow Matching 理论（1h，两人都读）
@@ -243,61 +243,94 @@ python data/generate_tsp_data.py --num_nodes 100 --num_samples 1000 --output_fil
   out = encoder(coords, adj_noisy, t)  # 期望输出 (2, 20, 20)
   ```
 
-### P3-2：Flow Matching 调度器（`models/diffusion_schedulers.py`）
-- [ ] 实现 `FlowMatchingScheduler`（替代 DIFUSCO 的 `CategoricalDiffusion`）：
+### P3-2：扩散调度器（`models/diffusion_schedulers.py`）— 三种框架
+
+#### P3-2a：FlowMatchingScheduler（连续 FM）
+- [ ] 实现 `FlowMatchingScheduler`：
   ```python
   class FlowMatchingScheduler:
       def interpolate(self, x0, epsilon, t):
           # X_t = (1 - t) * x0 + t * epsilon
-          # t: scalar or (B,) tensor, x0/epsilon: (B, N, N)
           return (1 - t) * x0 + t * epsilon
 
       def get_velocity_target(self, x0, epsilon):
           # v* = epsilon - x0  (恒定速度场)
           return epsilon - x0
   ```
-- [ ] 保留 `InferenceSchedule`（推理时间步序列，t 从 1.0 递减到 0.0）：
+- [ ] 实现 `InferenceSchedule`（推理时间步序列，t 从 1.0 递减到 0.0）
+- [ ] 注意：无需 beta schedule / alpha_bar，损失为 MSE
+
+#### P3-2b：BernoulliDiffusion（离散 DDPM — DIFUSCO SOTA）
+- [ ] 实现 `BernoulliDiffusion`（参考 DIFUSCO 的 `CategoricalDiffusion`）：
   ```python
-  class InferenceSchedule:
-      def __init__(self, inference_steps=20):
-          self.steps = inference_steps
+  class BernoulliDiffusion:
+      def __init__(self, T=1000, beta_schedule='linear'):
+          # 设置 β_t 序列，T 步
+          # 计算累积翻转概率 q(x_t | x_0)
 
-      def __iter__(self):
-          # 生成 t = 1.0, 0.95, 0.90, ..., 0.05, 0.0
-          dt = 1.0 / self.steps
-          for i in range(self.steps):
-              t = 1.0 - i * dt
-              yield t, dt
+      def sample(self, x0, t):
+          # 以累积概率翻转 x0 的 0/1 元素
+          # 返回 x_t ∈ {0,1}^(N×N)（始终二值）
+
+      def posterior(self, x_t, pred_logits, t):
+          # D3PM 离散后验：p(x_{t-1} | x_t, pred_x0)
+          # 返回 x_{t-1} ∈ {0,1}^(N×N)
   ```
-- [ ] 注意：不再需要 beta schedule，不需要 alpha_bar，损失改为 MSE（而非 BCE）
+- [ ] 参考代码：`refs/DIFUSCO/difusco/utils/diffusion_schedulers.py`
+- [ ] 注意：损失为 BCE，中间状态始终是二值矩阵
 
-### P3-3：主模型（`models/tsp_model.py`）
+#### P3-2c：GaussianDiffusion（连续 DDPM — 对照组）
+- [ ] 实现 `GaussianDiffusion`：
+  ```python
+  class GaussianDiffusion:
+      def __init__(self, T=1000, beta_schedule='linear'):
+          # 设置 β_t, α_bar_t 序列
+
+      def sample(self, x0, t):
+          # adj_t = √ᾱ_t * x0 + √(1-ᾱ_t) * ε
+          # 返回 adj_t ∈ ℝ^(N×N), ε
+
+      def ddim_step(self, x_t, pred_eps, t, t_prev):
+          # DDIM 确定性采样步 (ε-parameterized)
+  ```
+- [ ] 参考代码：DIFUSCO 的连续高斯版本
+
+### P3-3：主模型（`models/tsp_model.py`）— 支持三种模式
 - [ ] 基于 DIFUSCO 的 `pl_tsp_model.py` 大幅简化（去掉 Lightning，用纯 PyTorch）：
   ```python
-  class TSPFlowMatchingModel(nn.Module):
-      def __init__(self, n_layers=4, hidden_dim=128, inference_steps=20):
-          self.encoder = GNNEncoder(n_layers, hidden_dim)  # 预测速度场 v_θ
-          self.scheduler = FlowMatchingScheduler()
-
-      def forward(self, coords, adj_t, t):
-          # 给定插值状态和时间步，预测速度场 v_θ(A_t, t, coords)
-          return self.encoder(coords, adj_t, t)
+  class TSPDiffusionModel(nn.Module):
+      def __init__(self, n_layers=4, hidden_dim=128, mode='flow_matching'):
+          """
+          mode: 'discrete_ddpm' | 'continuous_ddpm' | 'flow_matching'
+          三种模式共享同一个 GNN 编码器，只改变调度器和损失函数
+          """
+          self.encoder = GNNEncoder(n_layers, hidden_dim)
+          self.mode = mode
+          if mode == 'flow_matching':
+              self.scheduler = FlowMatchingScheduler()
+          elif mode == 'continuous_ddpm':
+              self.scheduler = GaussianDiffusion(T=1000)
+          elif mode == 'discrete_ddpm':
+              self.scheduler = BernoulliDiffusion(T=1000)
 
       def compute_loss(self, coords, adj_0):
-          # 1. 采样时间步 t ~ Uniform(0, 1)
-          # 2. 采样噪声 epsilon ~ N(0, I)
-          # 3. 插值：adj_t = scheduler.interpolate(adj_0, epsilon, t)
-          # 4. 前向：pred_velocity = self.forward(coords, adj_t, t)
-          # 5. 损失：MSE(pred_velocity, epsilon - adj_0)
-          return loss
+          # 根据 self.mode 选择不同的采样/损失方式
+          if self.mode == 'flow_matching':
+              # t ~ U(0,1), MSE(v_θ, ε - adj_0)
+          elif self.mode == 'continuous_ddpm':
+              # {0,1}→{-1,1}缩放, t ~ randint(1,T), MSE(pred_eps, epsilon)  [ε-prediction]
+          elif self.mode == 'discrete_ddpm':
+              # t ~ randint(1,T), BCE(pred_logits, adj_0)
 
       @torch.no_grad()
       def sample(self, coords, inference_steps=20):
-          # 从纯噪声 X_1 ~ N(0,I) 开始，用欧拉法积分到 X_0
-          # X_{t-dt} = X_t - dt * v_θ(X_t, t, coords)
-          return heatmap  # shape: (N, N), values in [0,1]
+          # 根据 self.mode 选择不同的推理方式
+          # FM: 欧拉 ODE 积分
+          # 连续 DDPM: DDIM 采样
+          # 离散 DDPM: D3PM 逆向采样
   ```
-- [ ] 验证：随机初始化时 MSE loss ≈ 1.0（随机速度预测的 L2 误差）
+- [ ] 验证初始 loss：FM → MSE ≈ 1.0；DDPM → BCE ≈ ln(2) ≈ 0.69
+- [ ] 通过 `--mode` 参数在 train.py 中切换三种模式
 
 ### P3-4：训练脚本（`train.py`）
 - [ ] 完整训练循环：

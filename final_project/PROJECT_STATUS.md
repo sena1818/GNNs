@@ -60,8 +60,8 @@ sheet/final_project/
 | 文件 | 需要实现的内容 | 参考来源 | 优先级 |
 |------|--------------|---------|--------|
 | **gnn_encoder.py** | `GNNLayer` 门控图卷积层 + `GNNEncoder` 多层编码器 + 位置编码 + 时间步嵌入 | `refs/DIFUSCO/difusco/models/gnn_encoder.py` | ⭐⭐⭐ |
-| **diffusion_schedulers.py** | `FlowMatchingScheduler` 直线插值 (`interpolate`) + 速度目标 (`get_velocity_target`) + `InferenceSchedule` 推理时间步 (t: 1.0→0.0, 20步欧拉积分) | 自行实现（Lipman et al. 2022，无需参考 DIFUSCO 的 CategoricalDiffusion） | ⭐⭐⭐ |
-| **tsp_model.py** | `TSPDiffusionModel` 组合编码器+扩散 + `compute_loss` + `denoise` 推理 | `refs/DIFUSCO/difusco/pl_tsp_model.py` (去掉Lightning) | ⭐⭐⭐ |
+| **diffusion_schedulers.py** | 三种调度器：`FlowMatchingScheduler`（直线插值 + 速度目标 + 欧拉推理）+ `BernoulliDiffusion`（离散 D3PM，参考 DIFUSCO SOTA）+ `GaussianDiffusion`（连续 DDPM 对照组）+ `InferenceSchedule` | FM: Lipman 2022; D3PM: DIFUSCO CategoricalDiffusion | ⭐⭐⭐ |
+| **tsp_model.py** | `TSPDiffusionModel(mode=...)` 支持三种模式 (discrete_ddpm / continuous_ddpm / flow_matching)，共享 GNN 编码器 + `compute_loss` + `sample` 推理 | `refs/DIFUSCO/difusco/pl_tsp_model.py` (去掉Lightning) | ⭐⭐⭐ |
 | **tsp_dataset.py** | `TSPDataset(Dataset)` 读取txt数据 → 返回 coords/adj_matrix/tour | `refs/DIFUSCO/difusco/co_datasets/tsp_graph_dataset.py` | ⭐⭐⭐ |
 
 ### 🔧 utils/ — 工具函数 (PHASE 4 + 6)
@@ -129,6 +129,8 @@ sheet/final_project/
 
 ## 关键超参数 (参考 DIFUSCO)
 
+**共享超参数（三种模式通用）：**
+
 | 参数 | 值 | 说明 |
 |------|-----|------|
 | batch_size | 64 (GPU不足→32) | — |
@@ -136,8 +138,17 @@ sheet/final_project/
 | weight_decay | 1e-4 | — |
 | epochs | 50 | — |
 | warmup_steps | 1000 | — |
-| inference_steps | 20 | 推理欧拉积分步数（Flow Matching，替代 DDPM 的 50-1000） |
 | n_layers | 4 | GNN 层数 |
 | hidden_dim | 128 | — |
 | ema_decay | 0.999 | — |
 | grad_clip | 1.0 | max_norm |
+
+**模式特定超参数：**
+
+| 参数 | 离散 DDPM | 连续 DDPM | Flow Matching |
+|------|----------|----------|--------------|
+| diffusion_steps (T) | 1000 | 1000 | N/A（连续 t） |
+| beta_schedule | linear | linear | N/A |
+| inference_steps | 50 | 50 | 20 |
+| 训练损失 | CrossEntropyLoss | MSE (ε-prediction) | MSE (velocity) |
+| 时间步采样 | randint(1, T) | randint(1, T) | U(0, 1) |

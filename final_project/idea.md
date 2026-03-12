@@ -19,7 +19,7 @@
 (1) Lightweight architecture ablation comparing Graph Transformer vs. GAT vs. GCN for efficiency-performance tradeoffs;
 (2) Cross-scale generalization testing (TSP-50 training → TSP-20/100/200 testing, target: TSP-100 gap < 2%);
 (3) Multi-modal generation producing 10 diverse high-quality paths;
-(4) **Flow Matching replacing DDPM**: Both DIFUSCO and T2T-CO use continuous Gaussian diffusion on a continuous relaxation of the {0,1} adjacency matrix. We replace the stochastic SDE with a deterministic straight-line ODE (Conditional Flow Matching), reducing inference steps from 50 → 10–20 while maintaining solution quality.
+(4) **Three-way generative framework comparison (Discrete DDPM vs Continuous DDPM vs Flow Matching)**: DIFUSCO's best results use discrete Bernoulli diffusion (D3PM), which outperforms its continuous Gaussian variant. We implement all three frameworks — discrete DDPM, continuous DDPM, and Conditional Flow Matching (deterministic straight-line ODE) — under the same GNN architecture to systematically study: Can FM's straight-line ODE bridge the performance gap between continuous and discrete diffusion on graph-structured combinatorial optimization?
 
 ## 3. Methodology and Feasibility
 
@@ -391,7 +391,7 @@ N×N矩阵，颜色越深表示连接概率越高
 2. ✅ **首次分析扩散TSP的跨规模泛化能力**
 3. ✅ **实时TSP求解**（Greedy解码 < 0.1秒）
 4. ✅ **震撼的可视化**（扩散/流匹配动画GIF）
-5. ✅ **Flow Matching 替代 DDPM**：将连续高斯扩散改造为直线 ODE，推理步数 50 → 10–20，对 GNN 更友好（无随机游走导致的图结构扰动）
+5. ✅ **三方对比：离散 DDPM vs 连续 DDPM vs Flow Matching**：系统对比三种生成框架在同一 GNN 架构下的 TSP 求解性能，探究 FM 的确定性直线 ODE 能否弥合连续-离散扩散的性能差距（推理步数从 50 降至 20）
 
 ---
 

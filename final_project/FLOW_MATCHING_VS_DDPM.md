@@ -1,13 +1,51 @@
 # Flow Matching vs DDPM：理论深度融合与实验对比指南
 
 > 针对"用生成模型求解 TSP"项目的技术决策文档
-> 核心问题：为什么用 Flow Matching 替代 DDPM？怎么做对比实验？它们在数学上是什么关系？
+> 核心研究问题：**Flow Matching 的直线 ODE 能否弥合连续扩散与离散扩散之间的性能差距？**
 
 ---
 
-## 第一部分：两种方法的理论本质
+## ⚠️ 重要事实修正（v3 更新）
 
-### 1.1 DDPM 的核心机制
+**DIFUSCO 论文的实验结论**（[Sun et al., NeurIPS 2023](https://arxiv.org/abs/2302.08224)）：
+
+> "discrete diffusion consistently outperforms the continuous diffusion models by a large margin"
+
+| 扩散类型 | TSP-50 Optimality Gap | 状态 |
+|---------|----------------------|------|
+| **离散伯努利扩散 (D3PM)** | ~0.10-0.17% | ← DIFUSCO 最终采用（SOTA） |
+| 连续高斯扩散 (DDPM) | ~0.25-0.30% | ← 明显更差 |
+| 连续 Flow Matching (Ours) | ??? | ← 本项目的探索目标 |
+
+**本文档的定位**：FM 只能替代连续高斯 DDPM（较弱版本），不能替代离散伯努利扩散（较强版本）。FM 的理论分析仍然正确——它确实比连续 DDPM 有结构性优势——但这是一个**有待验证的研究问题**，而非已确认的结论。
+
+**项目采用三方对比实验设计**：同时实现 离散 DDPM + 连续 DDPM + 连续 FM，系统对比三者在 TSP 上的表现。
+
+---
+
+## 第一部分：三种方法的理论本质
+
+### 1.0 离散伯努利扩散（DIFUSCO 的 SOTA 方法）
+
+DIFUSCO 的最佳结果使用**离散扩散** (D3PM)，在 {0,1} 空间内做噪声注入：
+
+**前向过程（比特翻转）：**
+
+$$q(\mathbf{X}_t[i,j] \mid \mathbf{X}_0[i,j]) = \text{Bernoulli}\!\left((1-\beta_t)\,\mathbf{X}_0[i,j] + \beta_t\,(1-\mathbf{X}_0[i,j])\right)$$
+
+即每个元素以概率 $\beta_t$ 被翻转（0→1 或 1→0），以概率 $(1-\beta_t)$ 保持不变。
+
+**关键特性**：中间状态 $\mathbf{X}_t$ **始终是二值矩阵** {0,1}^(N×N)——它在任何时刻都是一张合法的图，GNN 的消息传递天然适配。
+
+**逆向过程**：GNN 预测每个元素为 1 的概率（logits），然后用 D3PM 的离散后验公式计算 $p(\mathbf{X}_{t-1} \mid \mathbf{X}_t)$。
+
+**损失函数**：BCE（二值交叉熵），预测每个位置的边概率。
+
+**为什么离散版本更好**：TSP 邻接矩阵本身就是 {0,1}，离散扩散的中间状态始终保持二值结构，GNN 在每一步都能有效地进行图上的消息传递。连续版本的中间状态充满 0.37、-0.82 这类值，不构成自然的图结构。
+
+---
+
+### 1.1 连续高斯 DDPM（DIFUSCO 的较弱变体）
 
 DDPM 定义了一个**随机**前向过程，将数据 $\mathbf{X}_0$ 逐步破坏为高斯噪声：
 
@@ -23,7 +61,7 @@ $$\mathbf{X}_t = \sqrt{\bar\alpha_t}\,\mathbf{X}_0 + \sqrt{1-\bar\alpha_t}\;\bol
 
 **逆向过程（去噪）：**
 
-神经网络学习预测噪声 $\boldsymbol{\epsilon}_\theta$ 或直接预测 $\mathbf{X}_0$（DIFUSCO 用的是预测 $\mathbf{X}_0$）：
+神经网络学习预测噪声 $\boldsymbol{\epsilon}_\theta$（DIFUSCO 连续高斯变体使用 ε-prediction）或预测 $\mathbf{X}_0$（DIFUSCO 离散变体使用 x₀-prediction）：
 
 $$\mathcal{L}_\text{DDPM} = \mathbb{E}_{t,\mathbf{X}_0,\boldsymbol{\epsilon}}\left[\left\|\boldsymbol{\epsilon}_\theta(\mathbf{X}_t, t) - \boldsymbol{\epsilon}\right\|^2\right]$$
 
@@ -99,9 +137,9 @@ $$\hat{v}_\theta = \boldsymbol{\epsilon} - \hat{\mathbf{X}}_0 = \frac{\mathbf{X}
 
 ---
 
-## 第二部分：为什么 FM 对 TSP-GNN 更优？
+## 第二部分：FM 相比连续 DDPM 的结构性优势（注意：离散 DDPM 仍是 SOTA）
 
-### 2.1 DDPM 的痛点（在图结构上）
+### 2.1 连续高斯 DDPM 的痛点（对比离散版本更差的原因）
 
 1. **布朗运动破坏稀疏性**：DDPM 的加噪过程通过 SDE 引入随机游走，中间状态 $\mathbf{X}_t$ 的元素值在 $\mathbb{R}$ 上剧烈震荡。对于 TSP 邻接矩阵这种极度稀疏（N 个非零元素 vs $N^2$ 总元素）的结构，随机噪声会彻底淹没稀疏信号。
 
@@ -109,9 +147,11 @@ $$\hat{v}_\theta = \boldsymbol{\epsilon} - \hat{\mathbf{X}}_0 = \frac{\mathbf{X}
 
 3. **离散时间步的 $T=1000$ 问题**：推理需要 50~1000 步，每步调用完整的 GNN 前向传播，对于 $N=100$ 节点的图（GNN 复杂度 $O(N^2)$）代价极高。
 
-### 2.2 FM 的优化点
+### 2.2 FM 相比连续 DDPM 的优化点
 
-| 维度 | DDPM | Flow Matching | 优化幅度 |
+> 以下对比的是"连续 DDPM"vs"FM"，**不是**"离散 DDPM"vs"FM"。FM 能否追平离散 DDPM 是本项目的核心研究问题。
+
+| 维度 | 连续 DDPM | Flow Matching | 优化幅度 |
 |------|------|--------------|---------|
 | **训练损失幅度一致性** | 不同 $t$ 的 loss 幅度差异大（需加权） | 恒定速度场，MSE 幅度一致 | 训练更稳定 |
 | **推理步数** | 50~1000 步 | 10~20 步（欧拉） | 5~50× 加速 |
@@ -136,41 +176,56 @@ $$\mathbb{E}[\mathbf{X}_t[i,j]] = (1-t) \cdot \mathbf{X}_0[i,j]$$
 
 ---
 
-## 第三部分：对比实验设计
+## 第三部分：三方对比实验设计
 
-### 3.1 核心对比实验（Ablation Study 0）
+### 3.1 核心对比实验（Three-Way Comparison）
 
-**目标**：在完全相同的 GNN 架构下，只替换生成框架（DDPM vs FM），量化改进。
+**目标**：在完全相同的 GNN 架构下，对比三种生成框架，回答核心研究问题：**FM 的直线 ODE 能否弥合连续扩散与离散扩散之间的性能差距？**
 
 **实验配置：**
 
 ```
-模型结构：     GNNEncoder (4层, hidden=128) — 完全相同
-数据集：       TSP-50, 5000 训练 / 1000 测试
-训练 epoch：  50
-批大小：       64
-优化器：       Adam (lr=2e-4)
+共享配置（三组完全相同）：
+  模型结构：     GNNEncoder (4层, hidden=128)
+  数据集：       TSP-50, 5000 训练 / 1000 测试
+  训练 epoch：  50
+  批大小：       64
+  优化器：       Adam (lr=2e-4)
 
-DDPM 组：
-  - 前向：q(X_t|X_0) = N(√ᾱ_t · X_0, (1-ᾱ_t)·I)，T=1000，linear schedule
-  - 损失：BCE(pred_X0, X0)  [DIFUSCO 原始设置]
-  - 推理：50 步 DDIM 采样
+A 组 — 离散伯努利 DDPM（DIFUSCO SOTA）：
+  - 前向：以概率 β_t 翻转 {0,1} 矩阵元素
+  - 中间状态：始终是二值矩阵 {0,1}^(N×N)
+  - 损失：BCE(pred_logits, X0)
+  - 推理：50 步 D3PM 逆向采样
 
-FM 组：
+B 组 — 连续高斯 DDPM：
+  - 前向：先 {0,1}→{-1,1} 缩放，再 q(X_t|X_0') = N(√ᾱ_t · X_0', (1-ᾱ_t)·I)，T=1000
+  - 中间状态：实数矩阵 ℝ^(N×N)
+  - GNN 预测：噪声 ε̂（ε-prediction，1 通道输出）
+  - 损失：MSE(pred_ε, ε)  [DIFUSCO 原始设置]
+  - 推理：50 步 DDIM 采样，最终 heatmap = 0.5*(X̂₀+1)
+
+C 组 — 连续 Flow Matching（本项目核心探索）：
   - 前向：X_t = (1-t)X_0 + t·ε，t ~ U(0,1)
+  - 中间状态：实数矩阵 ℝ^(N×N)
   - 损失：MSE(v_θ(X_t,t), ε - X_0)
   - 推理：20 步欧拉积分
 ```
 
 **记录指标：**
 
-| 指标 | DDPM | FM | Delta |
-|------|------|----|-------|
-| Best Optimality Gap (TSP-50) | — | — | — |
-| 训练至 loss<0.3 所需 epoch | — | — | — |
-| 单实例推理时间 (ms) | — | — | — |
-| 推理步数 | 50 | 20 | -60% |
-| 训练 loss 曲线平滑度 | — | — | — |
+| 指标 | A: 离散 DDPM | B: 连续 DDPM | C: FM | B→C 改进 |
+|------|-------------|-------------|-------|---------|
+| Best Optimality Gap (TSP-50) | — | — | — | — |
+| 训练至 loss 收敛所需 epoch | — | — | — | — |
+| 单实例推理时间 (ms) | — | — | — | — |
+| 推理步数 | 50 | 50 | 20 | -60% |
+| 训练 loss 曲线平滑度 | — | — | — | — |
+
+**预期结论**：
+- A（离散）> C（FM）≥ B（连续 DDPM）：FM 优于连续 DDPM，但仍不及离散版本
+- 或 C ≈ A：FM 的直线 ODE 成功弥合差距（最理想结果）
+- 核心洞见：无论哪种结果都有学术价值——前者解释了"为什么离散扩散更适合图结构"，后者证明了"确定性 ODE 可以替代随机 SDE"
 
 ---
 
@@ -222,18 +277,27 @@ plt.legend()
 
 ---
 
-### 3.4 实验结果汇报格式（报告用表格）
+### 3.4 实验结果汇报格式（报告用三方对比表格）
 
 ```
-Table 2: Flow Matching vs DDPM on TSP-50/100
+Table 2: Three-Way Comparison on TSP-50
 
-| Method          | Inference Steps | TSP-50 Gap (%) | TSP-100 Gap (%) | Inference Time |
-|-----------------|----------------|----------------|-----------------|----------------|
-| DDPM (DIFUSCO)  | 50             | X.X ± 0.X     | X.X ± 0.X      | XXX ms         |
-| DDPM (DIFUSCO)  | 20             | X.X ± 0.X     | X.X ± 0.X      | XXX ms         |
-| FM (Ours)       | 10             | X.X ± 0.X     | X.X ± 0.X      | XXX ms         |
-| FM (Ours)       | 20             | X.X ± 0.X     | X.X ± 0.X      | XXX ms         |
-| FM (Ours)       | 50             | X.X ± 0.X     | X.X ± 0.X      | XXX ms         |
+| Method              | Type       | Inference Steps | TSP-50 Gap (%) | Inference Time |
+|---------------------|------------|----------------|----------------|----------------|
+| Discrete DDPM       | {0,1}      | 50             | X.X ± 0.X      | XXX ms         |
+| Continuous DDPM     | ℝ          | 50             | X.X ± 0.X      | XXX ms         |
+| Flow Matching       | ℝ (ODE)   | 20             | X.X ± 0.X      | XXX ms         |
+| Flow Matching       | ℝ (ODE)   | 50             | X.X ± 0.X      | XXX ms         |
+
+Table 3: FM Inference Steps Ablation
+
+| Method              | Steps | TSP-50 Gap (%) | Inference Time |
+|---------------------|-------|----------------|----------------|
+| FM (Ours)           | 5     | X.X ± 0.X      | XXX ms         |
+| FM (Ours)           | 10    | X.X ± 0.X      | XXX ms         |
+| FM (Ours)           | 20    | X.X ± 0.X      | XXX ms         |
+| FM (Ours)           | 50    | X.X ± 0.X      | XXX ms         |
+| Continuous DDPM     | 50    | X.X ± 0.X      | XXX ms         |  ← 对照
 ```
 
 ---
@@ -430,23 +494,25 @@ X_0 → ε（随机配对）     X_0 → ε（最优传输配对）
 
 ```
 4.1 Training Convergence (必做)
-    图：DDPM vs FM 的 training loss 曲线（50 epochs）
-    结论：FM 收敛更快、更平滑
+    图：离散DDPM vs 连续DDPM vs FM 的 training loss 曲线（50 epochs）
+    注意：三种方法的损失量纲不同，需分别做归一化再比较收敛速度
+    结论：分析三者收敛速度差异
 
-4.2 Flow Matching Inference Steps Ablation (必做)
+4.2 Three-Way Comparison: Core Results (必做, 本项目核心实验)
+    表：离散DDPM / 连续DDPM / FM 的 Gap/时间/成功率
+    核心研究问题：FM 能否弥合连续-离散差距？
+    结论：定量回答研究问题
+
+4.3 Flow Matching Inference Steps Ablation (必做)
     表：FM 在 K=5/10/20/50 步下的 Gap 和推理时间
     图：Pareto 曲线（横轴=时间，纵轴=Gap）
     结论：K=20 是最优 Pareto 点
-
-4.3 DDPM vs FM 核心对比 (必做)
-    表：DDPM-50步 vs FM-20步 的 Gap/时间/成功率
-    结论：FM 用更少步数达到相当或更好的质量
 
 4.4 GNN Architecture Ablation（原有实验，不受影响）
     表：Gated GCN / GAT / GCN 在 FM 框架下的对比
 
 4.5 Cross-Scale Generalization（原有实验，不受影响）
-    曲线：TSP-20/50/100/200 的 Gap 趋势
+    曲线：TSP-20/50/100 的 Gap 趋势
 ```
 
 ---
@@ -496,11 +562,11 @@ adj_0 ∈ {0,1}^(4×4):
 
 ### 7.2 DIFUSCO 的前向加噪：每个矩阵元素的轨迹
 
-DIFUSCO 的连续高斯扩散公式（直接采样任意时刻）：
+DIFUSCO 连续变体先将 {0,1} 缩放到 {-1,1}（`adj_0 = adj_0 * 2 - 1`），然后用高斯扩散公式（直接采样任意时刻）：
 
-$$\text{adj}_t = \sqrt{\bar\alpha_t} \cdot \text{adj}_0 + \sqrt{1-\bar\alpha_t} \cdot \boldsymbol{\epsilon}$$
+$$\text{adj}_t = \sqrt{\bar\alpha_t} \cdot \text{adj}_0' + \sqrt{1-\bar\alpha_t} \cdot \boldsymbol{\epsilon}$$
 
-其中 $\boldsymbol{\epsilon} \sim \mathcal{N}(0, I)$ 是一个独立同分布的 4×4 高斯噪声矩阵。
+其中 $\text{adj}_0' \in \{-1, +1\}^{N \times N}$ 是缩放后的邻接矩阵，$\boldsymbol{\epsilon} \sim \mathcal{N}(0, I)$ 是高斯噪声。
 
 设线性 schedule 下的 $\sqrt{\bar\alpha_t}$ 在不同时刻的值：
 
@@ -521,40 +587,45 @@ $$\text{adj}_t = \sqrt{\bar\alpha_t} \cdot \text{adj}_0 + \sqrt{1-\bar\alpha_t} 
      [ 0.6, -0.4,  0.9, -0.7], ...]
 ```
 
-则在 t = 500 时，adj_500 的前两行：
-```
-adj_500[0,:] = 0.5 * [0, 1, 0, 1] + 0.866 * [-0.3, 0.8, -1.2, 0.5]
-             = [0,   0.5,  0,   0.5] + [-0.26, 0.69, -1.04, 0.43]
-             = [-0.26, 1.19, -1.04, 0.93]
+注意：adj_0 已缩放到 {-1,1}，原来的 0→-1，1→+1。
 
-adj_500[1,:] = 0.5 * [1, 0, 1, 0] + 0.866 * [0.6, -0.4, 0.9, -0.7]
-             = [0.5,  0,   0.5,  0 ] + [0.52, -0.35, 0.78, -0.61]
-             = [1.02, -0.35, 1.28, -0.61]
+则在 t = 500 时（√ᾱ_500 ≈ 0.5，√(1-ᾱ_500) ≈ 0.866），adj_500 的前两行：
+```
+adj_0' = [-1, +1, -1, +1]   ← 缩放后：非边=-1, 边=+1
+adj_500[0,:] = 0.5 * [-1, +1, -1, +1] + 0.866 * [-0.3, 0.8, -1.2, 0.5]
+             = [-0.5, 0.5, -0.5, 0.5] + [-0.26, 0.69, -1.04, 0.43]
+             = [-0.76, 1.19, -1.54, 0.93]
+
+adj_0' = [+1, -1, +1, -1]
+adj_500[1,:] = 0.5 * [+1, -1, +1, -1] + 0.866 * [0.6, -0.4, 0.9, -0.7]
+             = [0.5, -0.5, 0.5, -0.5] + [0.52, -0.35, 0.78, -0.61]
+             = [1.02, -0.85, 1.28, -1.11]
 ```
 
 **关键观察**：
-- `adj_500[0,1] = 1.19` → 真实边（adj_0=1），值偏正（仍有弱信号）
-- `adj_500[0,2] = -1.04` → 真实非边（adj_0=0），值偏负（混入噪声）
-- 两类元素的分布已**严重重叠**，GNN 在 t=500 时处理的是一个几乎无法区分边/非边的矩阵
+- `adj_500[0,1] = 1.19` → 真实边（adj_0'=+1），值偏正（弱信号保留）
+- `adj_500[0,2] = -1.54` → 真实非边（adj_0'=-1），值偏负
+- 由于初始值以 0 为中心（{-1,+1}），边和非边的均值差 = 2×√ᾱ_t = 1.0（比 {0,1} 编码的 0.5 差更大）
+- 但噪声标准差已达 0.866，**信噪比仍然较低**
 
-**DIFUSCO 的关键痛点就在这里**：当 $t \geq 500$ 时，$\sqrt{\bar\alpha_t} \leq 0.5$，矩阵中边和非边的均值差只剩不到 0.5，而噪声标准差已接近 1.0，**信噪比 < 0.5**，GNN 的图卷积在一个几乎随机的图上做消息传递，效果极差。
+**连续版本比离散版本差的核心原因**：即使有 {-1,1} 编码优势，中间状态仍是任意实数，不构成自然的图结构。GNN 的消息传递在实数加权图上的效果不如在二值图上清晰。
 
 ---
 
 ### 7.3 DIFUSCO 的逆向去噪：DDPM 后验公式
 
-已知 GNN 预测 $\widehat{\text{adj}}_0$（边概率 logits），DIFUSCO 用 DDPM 后验计算 $\text{adj}_{t-1}$：
+已知 GNN 预测噪声 $\hat{\boldsymbol{\epsilon}}$（ε-prediction），DIFUSCO 用 DDPM 后验计算 $\text{adj}_{t-1}$：
 
-**Step 1**：从 $\text{adj}_t$ 和 $\widehat{\text{adj}}_0$ 反推噪声估计：
-$$\hat{\boldsymbol{\epsilon}} = \frac{\text{adj}_t - \sqrt{\bar\alpha_t}\,\widehat{\text{adj}}_0}{\sqrt{1-\bar\alpha_t}}$$
+**Step 1**：从预测的噪声 $\hat{\boldsymbol{\epsilon}}$ 推导干净数据估计：
+$$\widehat{\text{adj}}_0 = \frac{\text{adj}_t - \sqrt{1-\bar\alpha_t}\,\hat{\boldsymbol{\epsilon}}}{\sqrt{\bar\alpha_t}}$$
 
-**Step 2**：计算 DDPM 后验均值：
-$$\mu_{t-1} = \frac{\sqrt{\bar\alpha_{t-1}}\,\beta_t}{1-\bar\alpha_t}\,\widehat{\text{adj}}_0 + \frac{\sqrt{\alpha_t}(1-\bar\alpha_{t-1})}{1-\bar\alpha_t}\,\text{adj}_t$$
+**Step 2**：使用 ε-parameterized DDPM 后验直接计算：
+$$\text{adj}_{t-1} = \frac{1}{\sqrt{\alpha_t}} \left(\text{adj}_t - \frac{1-\alpha_t}{\sqrt{1-\bar\alpha_t}}\,\hat{\boldsymbol{\epsilon}}\right) + \sigma_t \cdot \boldsymbol{\eta}$$
 
-**Step 3**：采样（如果用 DDIM 则 σ=0，完全确定）：
-$$\text{adj}_{t-1} = \mu_{t-1} + \sigma_t \cdot \boldsymbol{\eta}, \quad \boldsymbol{\eta} \sim \mathcal{N}(0, I)$$
+或用 DDIM 确定性公式（σ=0）：
+$$\text{adj}_{t-1} = \sqrt{\frac{\bar\alpha_{t-1}}{\bar\alpha_t}} \left(\text{adj}_t - \sqrt{1-\bar\alpha_t}\,\hat{\boldsymbol{\epsilon}}\right) + \sqrt{1-\bar\alpha_{t-1}}\,\hat{\boldsymbol{\epsilon}}$$
 
-**矩阵层面的含义**：每走一步，矩阵中每个元素都要经过"先用 GNN 预测 adj_0，再用加权平均混合回当前状态"的双重操作。需要 50~1000 次循环。
+**矩阵层面的含义**：每走一步，矩阵中每个元素都要经过"先用 GNN 预测噪声 ε̂，再用后验公式去噪"的操作。需要 50~1000 次循环。
 
 ---
 
@@ -674,33 +745,43 @@ Step 20（t=0.05 → t=0）:
 
 ---
 
-## 第九部分：DIFUSCO ↔ FM 的操作对照表
+## 第九部分：三种方法的操作对照表
 
-### 9.1 核心操作一一对应
+### 9.1 核心操作三方对比
 
-| 操作 | DIFUSCO（矩阵形式） | Flow Matching（矩阵形式） |
-|------|-------------------|------------------------|
-| **加噪公式（元素级）** | `adj_t[i,j] = √ᾱ_t · adj_0[i,j] + √(1-ᾱ_t) · ε[i,j]` | `adj_t[i,j] = (1-t) · adj_0[i,j] + t · ε[i,j]` |
-| **t=0.5时信号保留** | `√ᾱ_500 ≈ 0.16`（仅16%） | `1-0.5 = 0.5`（50%） |
-| **GNN 预测目标** | `adj_0_hat[i,j]`（边概率 logit） | `v_θ[i,j] = ε[i,j] - adj_0[i,j]`（速度） |
-| **训练损失** | `BCE(sigmoid(adj_0_hat), adj_0)` | `MSE(v_θ, ε - adj_0)` |
-| **推理出发点** | `adj_T ~ N(0, I)`，T=1000 | `adj_1 ~ N(0, I)`，t=1.0 |
-| **推理更新（每步）** | DDPM 后验（三项加权公式） | `adj_{t-dt} = adj_t - dt · v_θ` |
-| **推理步数** | 50~1000 步 | 10~20 步 |
-| **最终输出** | `sigmoid(adj_0_hat)` | `sigmoid(adj_0)` |
+| 操作 | 离散伯努利 DDPM（SOTA） | 连续高斯 DDPM | Flow Matching |
+|------|----------------------|--------------|--------------|
+| **数据空间** | {0,1}^(N×N) | ℝ^(N×N) | ℝ^(N×N) |
+| **加噪方式** | 以 β_t 概率翻转 0↔1 | `√ᾱ_t · x0 + √(1-ᾱ_t) · ε` | `(1-t) · x0 + t · ε` |
+| **中间状态** | 二值矩阵（合法图） | 实数矩阵（非自然图） | 实数矩阵（线性插值） |
+| **t=0.5时信号** | ~50% 元素被翻转 | `√ᾱ_500 ≈ 0.16`（16%） | `1-0.5 = 0.5`（50%） |
+| **数据预处理** | — | {0,1}→{-1,1} 缩放 | — |
+| **GNN 预测目标** | 每元素 P(=1) 的 logit (2ch) | `epsilon_hat`（噪声，1ch） | `v_θ = ε - adj_0`（速度） |
+| **训练损失** | CrossEntropyLoss | MSE(ε̂, ε) | MSE（速度回归） |
+| **推理出发点** | 均匀随机 {0,1}^(N×N) | `N(0, I)` | `N(0, I)` |
+| **推理更新** | D3PM 离散后验公式 | DDPM 三项加权公式 | `adj -= dt · v_θ`（一行） |
+| **推理步数** | 50 步 | 50~1000 步 | 10~20 步 |
+| **最终输出** | `softmax(logits)[:,1]` | `0.5*(X̂₀+1)` | `sigmoid(adj_0)` |
+| **超参数复杂度** | β schedule + T | β schedule + T | 仅推理步数 K |
 
 ### 9.2 参数化等价转换（可互相推导）
 
-设 GNN 实际预测的是 `adj_0_hat`（DIFUSCO 风格），可以在推理时等价地用 FM 方式：
+DIFUSCO 连续变体的 GNN 实际预测噪声 `epsilon_hat`（ε-prediction），可以在推理时等价地转换为 FM 方式。
+
+**Step 1**：从 ε̂ 推导出 x̂₀：
 
 ```python
-# DIFUSCO 方式：GNN 输出 adj_0_hat
-adj_0_hat = gnn(coords, adj_t, t)   # 预测边概率
+# DIFUSCO 方式：GNN 输出 epsilon_hat
+epsilon_hat = gnn(coords, adj_t, t)   # 预测噪声
 
+# 推导 adj_0_hat
+adj_0_hat = (adj_t - sqrt(1-abar_t) * epsilon_hat) / sqrt(abar_t)
+```
+
+**Step 2**：转换为 FM 速度进行积分：
+
+```python
 # 等价转换为 FM 速度（在推理时使用，无需重新训练）：
-# 从 adj_t = (1-t)*adj_0 + t*ε 反推：ε = (adj_t - (1-t)*adj_0) / t
-# 因此 v* = ε - adj_0 = (adj_t - adj_0) / t
-# 用 adj_0_hat 替代 adj_0：
 v_equivalent = (adj_t - adj_0_hat) / t      # 当 t > 0 时有效
 
 # FM 欧拉步
@@ -711,11 +792,11 @@ adj_next = adj_t - dt * v_equivalent
 
 ### 9.3 训练目标的等价性证明
 
-设 GNN 采用 x0-预测参数化：`adj_0_hat = gnn(adj_t, t, coords)`
+DIFUSCO 连续变体采用 ε-prediction 参数化：`epsilon_hat = gnn(adj_t, t, coords)`
 
-则 DIFUSCO 的 BCE 损失（在连续松弛意义下）可以改写为：
+DIFUSCO 的 MSE 损失：
 
-$$\mathcal{L}_\text{DIFUSCO} \approx \mathbb{E}\left[\text{BCE}(\sigma(\widehat{\text{adj}}_0), \text{adj}_0)\right]$$
+$$\mathcal{L}_\text{DIFUSCO} = \mathbb{E}\left[\left\|\hat{\boldsymbol{\epsilon}} - \boldsymbol{\epsilon}\right\|^2\right]$$
 
 而 FM 的 MSE 损失，其中 $v_\theta = (\text{adj}_t - \widehat{\text{adj}}_0) / t$（等价参数化），展开得：
 
@@ -727,30 +808,33 @@ $$\mathcal{L}_\text{FM} = \mathbb{E}\left[\left\|\frac{\text{adj}_t - \widehat{\
 
 ---
 
-## 第十部分：DIFUSCO 代码结构 → FM 代码结构的精确映射
+## 第十部分：三种方法的代码结构精确映射
 
-### 10.1 逐函数替换清单
+### 10.1 逐函数对照清单
 
 ```
-DIFUSCO 原函数                         → FM 等价函数
-─────────────────────────────────────────────────────
-CategoricalDiffusion.__init__()        → FlowMatchingScheduler.__init__()  (极简，无参数)
-  设置 β_schedule, α_bar_t (1000步)    → 无需任何预计算
+离散伯努利 DDPM (A)                    连续高斯 DDPM (B)                     Flow Matching (C)
+───────────────────────────────────    ───────────────────────────────────    ──────────────────────────────
+BernoulliDiffusion.__init__()          CategoricalDiffusion.__init__()        FlowMatchingScheduler.__init__()
+  设置 β_schedule (T步)                 设置 β_schedule, α_bar_t (T步)          无需任何预计算
 
-CategoricalDiffusion.sample(x0, t)     → FlowMatchingScheduler.interpolate(x0, ε, t)
-  adj_t = √ᾱ_t * x0 + √(1-ᾱ_t) * ε   → adj_t = (1-t) * x0 + t * ε
+BernoulliDiffusion.sample(x0, t)       CategoricalDiffusion.sample(x0, t)     FMS.interpolate(x0, ε, t)
+  以 β_t 概率翻转 x0 的每个 bit          adj_t = √ᾱ_t*x0 + √(1-ᾱ_t)*ε         adj_t = (1-t)*x0 + t*ε
+  结果仍为 {0,1} 矩阵                   结果为 ℝ 矩阵                          结果为 ℝ 矩阵
 
-pl_tsp_model.training_step()           → TSPFlowMatchingModel.compute_loss()
-  t = randint(1, T)                    → t = rand(0, 1)    [连续均匀分布]
-  adj_t = diffusion.sample(adj_0, t)   → adj_t = sched.interpolate(adj_0, ε, t)
-  pred = gnn(coords, adj_t, t/T)      → pred = gnn(coords, adj_t, t)
-  loss = BCE(sigmoid(pred), adj_0)     → loss = MSE(pred, ε - adj_0)
+training_step():                       training_step():                       compute_loss():
+  t = randint(1, T)                     t = randint(1, T)                      t = rand(0, 1)
+  adj_t = bernoulli_flip(adj_0, t)      adj_0' = adj_0*2-1  # {-1,1}缩放      adj_t = interpolate(adj_0, ε, t)
+  pred = gnn(coords, adj_t, t/T)        adj_t = gauss_noise(adj_0', t)         pred_v = gnn(coords, adj_t, t)
+  loss = CE(pred, adj_0)                pred_eps = gnn(coords, adj_t, t/T)     loss = MSE(pred_v, ε - adj_0)
+                                        loss = MSE(pred_eps, epsilon)
 
-pl_tsp_model.test_step() 推理循环      → TSPFlowMatchingModel.sample()
-  for t in T, T-1, ..., 1:            → for t, dt in InferenceSchedule(20):
-    pred_adj0 = gnn(adj_t, t)          →   v = gnn(adj_t, t)
-    adj_t-1 = ddpm_posterior(...)      →   adj_t = adj_t - dt * v
-  heatmap = sigmoid(adj_t=0)          → heatmap = sigmoid(adj_t=0)
+test_step() 推理:                       test_step() 推理:                       sample() 推理:
+  adj ~ Bernoulli(0.5)^(N×N)            adj ~ N(0, I)                          adj ~ N(0, I)
+  for t in T,...,1:                      for t in T,...,1:                      for t,dt in Schedule(20):
+    logits = gnn(adj, t)                  pred_eps = gnn(adj, t)                 v = gnn(adj, t)
+    adj = d3pm_posterior(logits)           adj = ddpm_posterior(pred_eps)          adj = adj - dt * v
+  heatmap = softmax(logits)[:,1]         heatmap = adj * 0.5 + 0.5            heatmap = sigmoid(adj)
 ```
 
 ### 10.2 完整的 DIFUSCO → FM 改造 diff（核心 3 处修改）
@@ -779,12 +863,13 @@ class FlowMatchingScheduler:
 
 
 # ========================= 改动 2：compute_loss 中的采样和损失 =========================
-# BEFORE（DIFUSCO）:
+# BEFORE（DIFUSCO 连续高斯变体）:
 def compute_loss(self, coords, adj_0):
-    t = torch.randint(1, self.T+1, (B,))              # 整数时间步
-    adj_t, epsilon = self.diffusion.sample(adj_0, t)  # 复杂加噪
-    pred_adj0 = self.gnn(coords, adj_t, t.float()/self.T)
-    return F.binary_cross_entropy_with_logits(pred_adj0, adj_0)  # BCE
+    adj_0_scaled = adj_0 * 2 - 1                       # {0,1}→{-1,1}
+    t = torch.randint(1, self.T+1, (B,))               # 整数时间步
+    adj_t, epsilon = self.diffusion.sample(adj_0_scaled, t)  # 高斯加噪
+    pred_eps = self.gnn(coords, adj_t, t.float()/self.T)    # ε-prediction
+    return F.mse_loss(pred_eps, epsilon)                 # MSE on noise
 
 # AFTER（FM）:
 def compute_loss(self, coords, adj_0):
@@ -797,16 +882,17 @@ def compute_loss(self, coords, adj_0):
 
 
 # ========================= 改动 3：推理循环 =========================
-# BEFORE（DIFUSCO，50步 DDIM）:
+# BEFORE（DIFUSCO 连续高斯变体，50步 DDIM）:
 @torch.no_grad()
 def denoise(self, coords, steps=50):
     adj = torch.randn(B, N, N)
     for t in reversed(range(0, 1000, 1000//steps)):
-        pred_adj0 = self.gnn(coords, adj, torch.full((B,), t/1000.))
-        # DDPM 后验（三项加权公式）
-        eps_hat = (adj - abar[t].sqrt() * pred_adj0) / (1-abar[t]).sqrt()
-        adj = abar[t-1000//steps].sqrt() * pred_adj0 + (1-abar[t-1000//steps]).sqrt() * eps_hat
-    return torch.sigmoid(adj)
+        pred_eps = self.gnn(coords, adj, torch.full((B,), t/1000.))
+        # DDIM 确定性后验（ε-parameterized）
+        t_prev = t - 1000//steps
+        adj = (abar[t_prev]/abar[t]).sqrt() * (adj - (1-abar[t]).sqrt() * pred_eps) \
+              + (1-abar[t_prev]).sqrt() * pred_eps
+    return adj * 0.5 + 0.5  # 反转 {-1,1} 缩放到 [0,1]
 
 # AFTER（FM，20步欧拉）:
 @torch.no_grad()
@@ -820,12 +906,13 @@ def sample(self, coords, steps=20):
     return torch.sigmoid(adj)
 ```
 
-### 10.3 改动量化
+### 10.3 实现复杂度对比
 
-| 维度 | DIFUSCO | FM 改造后 | 节省 |
-|------|---------|-----------|------|
-| Scheduler 代码行数 | ~80行（beta schedule + 推理） | ~15行 | -81% |
-| 训练时采样代码 | 5行 | 3行 | -40% |
-| 推理循环复杂度 | 7行（3项加权公式） | 2行（一步欧拉） | -71% |
-| 超参数数量 | 5个（T, β_min, β_max, schedule类型, T推理） | 1个（推理步数K） | -80% |
-| GNN 结构改动 | — | 无需改动 | 0% |
+| 维度 | 离散 DDPM | 连续 DDPM | Flow Matching |
+|------|----------|----------|--------------|
+| Scheduler 代码行数 | ~100行（D3PM 后验） | ~80行（β schedule） | ~15行 |
+| 训练时采样代码 | 5行（bit flip） | 5行（高斯噪声） | 3行（线性插值） |
+| 推理循环复杂度 | 8行（离散后验公式） | 7行（三项加权公式） | 2行（一步欧拉） |
+| 超参数数量 | 5个 | 5个 | 1个（推理步数K） |
+| GNN 结构改动 | 基准 | 无需改动 | 无需改动 |
+| 实现难度 | 中等（需理解 D3PM） | 中等 | 最简单 |

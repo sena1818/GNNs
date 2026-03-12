@@ -54,6 +54,29 @@
 \subsection{Denoising Diffusion Probabilistic Models}
 % TODO: DDPM 前向/逆向公式
 
+\subsection{Discrete vs.\ Continuous Diffusion for Graphs}
+\label{sec:discrete_vs_continuous}
+An important finding from DIFUSCO~\cite{sun2023difusco} is that \emph{discrete} Bernoulli
+diffusion (D3PM) consistently outperforms continuous Gaussian diffusion for graph-structured
+combinatorial optimization. In discrete diffusion, the binary adjacency matrix
+$\mathbf{X}_0 \in \{0,1\}^{N \times N}$ is corrupted by randomly flipping entries with
+probability $\beta_t$, so intermediate states $\mathbf{X}_t$ remain binary matrices---i.e.,
+valid graphs at every timestep. The GNN's message-passing naturally operates on such
+binary adjacency structures, preserving topological information throughout the diffusion
+trajectory.
+
+In contrast, continuous Gaussian diffusion relaxes $\mathbf{X}_0$ to $\mathbb{R}^{N \times N}$
+and adds Gaussian noise, producing intermediate states with arbitrary real values (e.g.,
+$-0.82$, $1.37$) that do not correspond to natural graph structures. On TSP-50, DIFUSCO
+reports ${\sim}0.10\text{--}0.17\%$ optimality gap with discrete diffusion versus
+${\sim}0.25\text{--}0.30\%$ with continuous diffusion---a significant performance gap.
+
+This raises a natural question: \emph{Can a better continuous-space generative framework
+close this gap?} Flow Matching, with its deterministic straight-line ODE and superior
+signal preservation (Section~\ref{sec:fm_tsp}), is a promising candidate. We implement
+all three variants under the same GNN architecture for systematic comparison
+(Section~\ref{sec:three_way}).
+
 \subsection{Flow Matching}
 Flow Matching~\cite{lipman2022flow} provides an elegant alternative to DDPM by defining a
 \emph{deterministic} probability flow between distributions.
@@ -101,11 +124,12 @@ giving the GNN a cleaner and more stable learning signal.
 \subsubsection{Continuous Relaxation}
 The ground-truth TSP adjacency matrix $\mathbf{X}_0 \in \{0,1\}^{N \times N}$ is a discrete
 object: each entry is 1 if the corresponding edge belongs to the optimal tour and 0 otherwise.
-Discrete diffusion over such binary matrices is notoriously unstable and typically
-underperforms its continuous counterpart~\cite{sun2023difusco}.
-We therefore apply a \emph{continuous relaxation}: $\mathbf{X}_0$ is treated as an ordinary
-real-valued tensor in $\mathbb{R}^{N \times N}$ — a vertex of the unit hypercube embedded in
-continuous space. This makes all continuous-space generative methods directly applicable.
+While DIFUSCO's best results use discrete Bernoulli diffusion (Section~\ref{sec:discrete_vs_continuous}),
+Flow Matching requires a continuous state space. We therefore apply a \emph{continuous relaxation}:
+$\mathbf{X}_0$ is treated as an ordinary real-valued tensor in $\mathbb{R}^{N \times N}$---a
+vertex of the unit hypercube embedded in continuous space. This makes Flow Matching directly
+applicable, and we investigate whether its straight-line ODE can compensate for the loss
+of discrete structure.
 
 \subsubsection{Forward Path and Training Objective}
 We construct a straight-line interpolation between $\mathbf{X}_0$ and Gaussian noise
@@ -150,7 +174,30 @@ decoded into a valid TSP tour (Section~\ref{sec:decoding}).
 \textit{[Primary Author: Joint]}
 
 \subsection{Training Convergence}
-% TODO: Loss 曲线图
+% TODO: Loss 曲线图 (三条曲线: 离散DDPM / 连续DDPM / FM)
+
+\subsection{Three-Way Comparison: Discrete DDPM vs.\ Continuous DDPM vs.\ Flow Matching}
+\label{sec:three_way}
+% TODO: 核心实验! 三方对比表格
+% 预期表格格式:
+%
+% \begin{table}[h]
+% \centering
+% \caption{Three-way comparison on TSP-50 with identical GNN architecture.}
+% \begin{tabular}{lcccc}
+% \toprule
+% Method & Type & Inference Steps & Opt.\ Gap (\%) & Time (ms) \\
+% \midrule
+% Discrete DDPM (D3PM) & $\{0,1\}$ & 50 & --- & --- \\
+% Continuous DDPM      & $\mathbb{R}$ & 50 & --- & --- \\
+% Flow Matching        & $\mathbb{R}$ (ODE) & 20 & --- & --- \\
+% Flow Matching        & $\mathbb{R}$ (ODE) & 50 & --- & --- \\
+% \bottomrule
+% \end{tabular}
+% \end{table}
+
+\subsection{Flow Matching Inference Steps Ablation}
+% TODO: FM 在 K=5/10/20/50 步下的 Gap 和推理时间 Pareto 曲线
 
 \subsection{Ablation: GNN Architecture}
 % TODO: 消融实验表格 (Gated GCN / GAT / GCN)
@@ -179,6 +226,7 @@ decoded into a valid TSP tour (Section~\ref{sec:decoding}).
 \bibitem{velickovic2018gat} Veli\v{c}kovi\'{c}, P. et al. (2018). Graph Attention Networks. \textit{ICLR}.
 \bibitem{kool2019attention} Kool, W. et al. (2019). Attention, Learn to Solve Routing Problems! \textit{ICLR}.
 \bibitem{lipman2022flow} Lipman, Y., Chen, R. T. Q., Ben-Hamu, H., Nickel, M., \& Le, M. (2022). Flow Matching for Generative Modeling. \textit{ICLR 2023}.
+\bibitem{austin2021d3pm} Austin, J., Johnson, D. D., Ho, J., Tarlow, D., \& van den Berg, R. (2021). Structured Denoising Diffusion Models in Discrete State-Spaces. \textit{NeurIPS}.
 \end{thebibliography}
 
 \end{document}
