@@ -15,7 +15,6 @@
 """
 
 import torch
-import numpy as np
 
 
 # ========================= 1. Flow Matching (连续 ODE) =========================
@@ -44,14 +43,35 @@ class FlowMatchingScheduler:
             x = x - dt * v                     # 欧拉步
         heatmap = torch.sigmoid(x)             # -> [0, 1]^(N*N)
     """
-    def interpolate(self, x0, epsilon, t):
-        # X_t = (1 - t) * x0 + t * epsilon
-        # t: scalar or (B,) tensor; x0, epsilon: (B, N, N)
-        raise NotImplementedError
 
-    def get_velocity_target(self, x0, epsilon):
-        # v* = epsilon - x0  (恒定速度场，与 t 无关)
-        raise NotImplementedError
+    def interpolate(self, x0: torch.Tensor, epsilon: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        """
+        线性插值: X_t = (1 - t) * x0 + t * epsilon
+
+        Args:
+            x0:      (B, N, N) 真实邻接矩阵（连续松弛后的浮点数）
+            epsilon: (B, N, N) 标准高斯噪声
+            t:       (B,) 时间步，值域 [0, 1]
+        Returns:
+            x_t:     (B, N, N) 插值状态
+        """
+        t = t.view(-1, 1, 1)  # broadcast over N×N
+        return (1.0 - t) * x0 + t * epsilon
+
+    def get_velocity_target(self, x0: torch.Tensor, epsilon: torch.Tensor) -> torch.Tensor:
+        """
+        恒定速度场目标: v* = epsilon - x0
+
+        与 t 完全无关——这是 FM 相比 DDPM 的核心简化。
+        GNN 在任意时刻学习的都是同一个方向向量。
+
+        Args:
+            x0:      (B, N, N)
+            epsilon: (B, N, N)
+        Returns:
+            v_target: (B, N, N)
+        """
+        return epsilon - x0
 
 
 class InferenceSchedule:
@@ -60,9 +80,12 @@ class InferenceSchedule:
 
     用法:
         for t, dt in InferenceSchedule(inference_steps=20):
-            x = x - dt * v_theta(x, t * ones)
+            t_tensor = torch.full((B,), t, device=device)
+            v = model(coords, x, t_tensor)
+            x = x - dt * v
     """
-    def __init__(self, inference_steps=20):
+
+    def __init__(self, inference_steps: int = 20):
         self.steps = inference_steps
 
     def __iter__(self):
