@@ -39,7 +39,7 @@ T2_probabilistic/
 
 # final_project 相关
 final_project/refs/
-final_project/data/*.txt
+# final_project/data/*.txt  # 数据文件需要跨机器同步，已取消忽略
 *.ckpt
 *.pt
 
