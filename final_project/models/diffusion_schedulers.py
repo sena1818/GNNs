@@ -6,7 +6,7 @@ Flow Matching 调度器 — 替代 DIFUSCO 的 CategoricalDiffusion
   Flow Matching 在同一连续空间中定义直线 ODE，无需 beta schedule，训练更稳定，
   推理步数从 50-1000 降低到 10-20。
 
-需要实现:
+实现的两个类:
 1. FlowMatchingScheduler: 直线插值 + 速度场
    - interpolate(x0, epsilon, t): X_t = (1-t)*x0 + t*epsilon
    - get_velocity_target(x0, epsilon): v* = epsilon - x0
@@ -22,10 +22,7 @@ Flow Matching 调度器 — 替代 DIFUSCO 的 CategoricalDiffusion
 """
 
 import torch
-import numpy as np
 
-
-# TODO: 实现以下两个类
 
 class FlowMatchingScheduler:
     """
@@ -46,14 +43,35 @@ class FlowMatchingScheduler:
             x = x - dt * v                     # 欧拉步
         heatmap = torch.sigmoid(x)             # -> [0, 1]^(N×N)
     """
-    def interpolate(self, x0, epsilon, t):
-        # X_t = (1 - t) * x0 + t * epsilon
-        # t: scalar or (B,) tensor; x0, epsilon: (B, N, N)
-        raise NotImplementedError
 
-    def get_velocity_target(self, x0, epsilon):
-        # v* = epsilon - x0  (恒定速度场，与 t 无关)
-        raise NotImplementedError
+    def interpolate(self, x0: torch.Tensor, epsilon: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        """
+        线性插值: X_t = (1 - t) * x0 + t * epsilon
+
+        Args:
+            x0:      (B, N, N) 真实邻接矩阵（连续松弛后的浮点数）
+            epsilon: (B, N, N) 标准高斯噪声
+            t:       (B,) 时间步，值域 [0, 1]
+        Returns:
+            x_t:     (B, N, N) 插值状态
+        """
+        t = t.view(-1, 1, 1)  # broadcast over N×N
+        return (1.0 - t) * x0 + t * epsilon
+
+    def get_velocity_target(self, x0: torch.Tensor, epsilon: torch.Tensor) -> torch.Tensor:
+        """
+        恒定速度场目标: v* = epsilon - x0
+
+        与 t 完全无关——这是 FM 相比 DDPM 的核心简化。
+        GNN 在任意时刻学习的都是同一个方向向量。
+
+        Args:
+            x0:      (B, N, N)
+            epsilon: (B, N, N)
+        Returns:
+            v_target: (B, N, N)
+        """
+        return epsilon - x0
 
 
 class InferenceSchedule:
@@ -62,11 +80,21 @@ class InferenceSchedule:
 
     用法:
         for t, dt in InferenceSchedule(inference_steps=20):
-            x = x - dt * v_theta(x, t * ones)
+            t_tensor = torch.full((B,), t, device=device)
+            v = model(coords, x, t_tensor)
+            x = x - dt * v
     """
-    def __init__(self, inference_steps=20):
+
+    def __init__(self, inference_steps: int = 20):
         self.steps = inference_steps
 
     def __iter__(self):
-        # 生成 (t_current, dt) 对，t 从 1.0 递减到约 0.0
-        raise NotImplementedError
+        """
+        生成 (t_current, dt) 对。
+        t 从 1.0 开始，每步减少 dt = 1/steps。
+        共 steps 步，最后一步结束时 t ≈ dt（不到 0，避免除零）。
+        """
+        dt = 1.0 / self.steps
+        for i in range(self.steps):
+            t_current = 1.0 - i * dt
+            yield t_current, dt

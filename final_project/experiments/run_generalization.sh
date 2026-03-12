@@ -1,23 +1,54 @@
 #!/bin/bash
-# 泛化实验：TSP-50 训练模型在不同规模上的表现
-# 测试: TSP-20, TSP-50, TSP-100
+# 实验 2：跨规模泛化测试
+# 用 TSP-50 训练的最佳模型，直接在 TSP-20 / TSP-50 / TSP-100 上测试（不重新训练）
+# 验证 Flow Matching + GNN 的泛化能力
+#
+# 用法（在 final_project/ 目录下运行）:
+#   bash experiments/run_generalization.sh
+#   bash experiments/run_generalization.sh checkpoints/fm_gat/best.pt  # 指定其他模型
 
 set -e
+cd "$(dirname "$0")/.."
 
-CHECKPOINT="checkpoints/gated_gcn/best.pt"
+CHECKPOINT="${1:-checkpoints/fm_gated_gcn/best.pt}"
+RESULTS_DIR="experiments/results"
+mkdir -p "$RESULTS_DIR"
 
-echo "=== 实验2: 跨规模泛化测试 ==="
+echo "============================================"
+echo " Cross-Scale Generalization Test"
+echo " Checkpoint: $CHECKPOINT"
+echo "============================================"
 
-echo "[1/3] Testing on TSP-20..."
-python evaluate.py --checkpoint $CHECKPOINT --data_file data/tsp20_train.txt
+for scale in 20 50 100; do
+    if [ "$scale" -eq 100 ]; then
+        DATA="data/tsp100_test.txt"
+    else
+        DATA="data/tsp${scale}_train.txt"
+    fi
 
-echo "[2/3] Testing on TSP-50..."
-python evaluate.py --checkpoint $CHECKPOINT --data_file data/tsp50_train.txt
+    if [ ! -f "$DATA" ]; then
+        echo "Skipping TSP-$scale: $DATA not found"
+        continue
+    fi
 
-echo "[3/3] Testing on TSP-100..."
-python evaluate.py --checkpoint $CHECKPOINT --data_file data/tsp100_test.txt
+    echo "--- TSP-$scale (greedy) ---"
+    python evaluate.py \
+        --checkpoint "$CHECKPOINT" \
+        --data_file "$DATA" \
+        --decode greedy \
+        --save_result "$RESULTS_DIR/gen_tsp${scale}_greedy.json"
 
-# 可选: 混合规模训练
-# echo "=== 混合规模训练 ==="
-# cat data/tsp20_train.txt data/tsp50_train.txt > data/mixed_train.txt
-# python train.py --data_file data/mixed_train.txt --save_dir checkpoints/mixed
+    echo "--- TSP-$scale (greedy+2opt) ---"
+    python evaluate.py \
+        --checkpoint "$CHECKPOINT" \
+        --data_file "$DATA" \
+        --decode greedy --use_2opt \
+        --save_result "$RESULTS_DIR/gen_tsp${scale}_greedy2opt.json"
+done
+
+echo ""
+echo "Done. Results in $RESULTS_DIR/"
+echo ""
+echo "Tip: for mixed-scale training to improve generalization:"
+echo "  cat data/tsp20_train.txt data/tsp50_train.txt > data/mixed_train.txt"
+echo "  python train.py --data_file data/mixed_train.txt --save_dir checkpoints/fm_mixed"

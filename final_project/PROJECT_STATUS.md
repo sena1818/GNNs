@@ -21,15 +21,15 @@ sheet/final_project/
 ├── data/
 │   ├── generate_tsp_data.py   ✅ 数据生成脚本 (已完成)
 │   ├── tsp20_train.txt        ✅ TSP-20 训练数据 (1000条, 已生成)
-│   ├── tsp50_train.txt        ❌ 需生成 (5000条)
-│   └── tsp100_test.txt        ❌ 需生成 (1000条)
+│   ├── tsp50_train.txt        ✅ TSP-50 训练数据 (5000条, 已生成)
+│   └── tsp100_test.txt        ✅ TSP-100 测试数据 (1000条, 已生成)
 │
 ├── models/
 │   ├── __init__.py            ✅ 包导入
-│   ├── gnn_encoder.py         ❌ GNN 编码器
-│   ├── diffusion_schedulers.py ❌ 扩散调度器
-│   ├── tsp_model.py           ❌ 主模型
-│   └── tsp_dataset.py         ❌ 数据集类
+│   ├── gnn_encoder.py         ✅ GatedGCN + GAT + SimpleGCN (已验证)
+│   ├── diffusion_schedulers.py ✅ FlowMatchingScheduler + InferenceSchedule
+│   ├── tsp_model.py           ✅ TSPFlowMatchingModel + compute_loss + sample (已验证)
+│   └── tsp_dataset.py         ✅ TSPDataset + collate_fn（已验证）
 │
 ├── utils/
 │   ├── __init__.py            ✅ 包导入
