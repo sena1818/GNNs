@@ -11,9 +11,15 @@ set -e
 cd "$(dirname "$0")/.."   # 切到 final_project/ 目录
 
 DATA="data/tsp50_train.txt"
-TEST="data/tsp50_train.txt"   # 也可换成 tsp20_train.txt 快速验证
+TEST="data/tsp50_test.txt"    # 独立测试集（不同于训练集）
 EPOCHS=50
 BATCH=32
+
+# 若测试集不存在，自动生成
+if [ ! -f "$TEST" ]; then
+    echo "Generating TSP-50 test set (1000 instances)..."
+    python data/generate_tsp_data.py --num_nodes 50 --num_samples 1000 --output_file "$TEST"
+fi
 RESULTS_DIR="experiments/results"
 mkdir -p "$RESULTS_DIR"
 

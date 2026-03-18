@@ -54,8 +54,8 @@ class TSPDiffusionModel(nn.Module):
     def __init__(
         self,
         mode: str = 'flow_matching',
-        n_layers: int = 4,
-        hidden_dim: int = 128,
+        n_layers: int = 12,
+        hidden_dim: int = 256,
         encoder_type: str = 'gated_gcn',
         T: int = 1000,
         inference_steps: int = None,
@@ -213,7 +213,9 @@ class TSPDiffusionModel(nn.Module):
         x = torch.bernoulli(torch.full((B, N, N), 0.5, device=device))
 
         timestep_pairs = self.scheduler.get_inference_timesteps(num_steps=steps)
-        pred_logits = None
+        assert len(timestep_pairs) > 0, "get_inference_timesteps returned empty list"
+        # 初始化为全零 logits（对应 Bernoulli(0.5)）；会被循环中的真实预测覆盖
+        pred_logits = torch.zeros(B, N, N, device=device)
 
         for t_val, t_prev_val in timestep_pairs:
             t_tensor = torch.full((B,), t_val, dtype=torch.long, device=device)

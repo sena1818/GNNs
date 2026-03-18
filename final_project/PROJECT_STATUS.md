@@ -15,32 +15,34 @@ sheet/final_project/
 ├── requirements.txt           ✅ 依赖列表 (已完成)
 ├── .gitignore                 ✅ (已完成)
 │
-├── train.py                   ❌ 训练入口
-├── evaluate.py                ❌ 评估入口
+├── train.py                   ✅ 训练入口 (已完成)
+├── evaluate.py                ✅ 评估入口 (已完成)
 │
 ├── data/
 │   ├── generate_tsp_data.py   ✅ 数据生成脚本 (已完成)
-│   ├── tsp20_train.txt        ✅ TSP-20 训练数据 (1000条, 已生成)
-│   ├── tsp50_train.txt        ✅ TSP-50 训练数据 (5000条, 已生成)
+│   ├── tsp20_train.txt        ✅ TSP-20 训练数据 (1000条) ← 建议扩充到 10k
+│   ├── tsp20_test.txt         ❌ TSP-20 测试数据 (500条)  ← 需生成
+│   ├── tsp50_train.txt        ✅ TSP-50 训练数据 (5000条) ← 建议扩充到 50k
+│   ├── tsp50_test.txt         ❌ TSP-50 测试数据 (1000条) ← 需生成
 │   └── tsp100_test.txt        ✅ TSP-100 测试数据 (1000条, 已生成)
 │
 ├── models/
 │   ├── __init__.py            ✅ 包导入
-│   ├── gnn_encoder.py         ✅ GatedGCN + GAT + SimpleGCN (已验证)
-│   ├── diffusion_schedulers.py ✅ FlowMatchingScheduler + InferenceSchedule
-│   ├── tsp_model.py           ✅ TSPFlowMatchingModel + compute_loss + sample (已验证)
+│   ├── gnn_encoder.py         ✅ GatedGCN(已对齐DIFUSCO) + GAT + SimpleGCN (已验证)
+│   ├── diffusion_schedulers.py ✅ FM + D3PM + GaussianDiffusion (已修复)
+│   ├── tsp_model.py           ✅ TSPDiffusionModel 三模式 + compute_loss + sample (已验证)
 │   └── tsp_dataset.py         ✅ TSPDataset + collate_fn（已验证）
 │
 ├── utils/
 │   ├── __init__.py            ✅ 包导入
-│   ├── tsp_utils.py           ❌ TSP 工具函数
-│   ├── decode.py              ❌ 解码器
-│   └── visualize.py           ❌ 可视化工具
+│   ├── tsp_utils.py           ✅ TSP 工具函数 (已完成)
+│   ├── decode.py              ✅ greedy + beam_search + 2-opt (已完成)
+│   └── visualize.py           ✅ 可视化工具 6种图 (已完成)
 │
 ├── experiments/
-│   ├── run_ablation_arch.sh   ❌ 架构消融实验
-│   ├── run_generalization.sh  ❌ 泛化测试实验
-│   └── run_decoding.sh        ❌ 解码策略对比 (可选)
+│   ├── run_ablation_arch.sh   ✅ 架构消融实验 (已修复测试集路径)
+│   ├── run_generalization.sh  ✅ 泛化测试实验 (已修复测试集路径)
+│   └── run_decoding.sh        ✅ 解码策略对比 (已完成)
 │
 ├── report/
 │   ├── main.tex               ❌ LaTeX 报告
@@ -99,8 +101,10 @@ sheet/final_project/
 | 文件 | 状态 | 生成命令 |
 |------|------|---------|
 | tsp20_train.txt | ✅ 已生成 (1000条) | — |
-| **tsp50_train.txt** | ❌ 需生成 | `python data/generate_tsp_data.py --num_nodes 50 --num_samples 5000 --output_file data/tsp50_train.txt` |
-| **tsp100_test.txt** | ❌ 需生成 | `python data/generate_tsp_data.py --num_nodes 100 --num_samples 1000 --output_file data/tsp100_test.txt` |
+| tsp50_train.txt | ✅ 5000条（建议扩充） | `python data/generate_tsp_data.py --num_nodes 50 --num_samples 50000 --output_file data/tsp50_train.txt` |
+| **tsp20_test.txt** | ❌ 需生成 | `python data/generate_tsp_data.py --num_nodes 20 --num_samples 500 --output_file data/tsp20_test.txt` |
+| **tsp50_test.txt** | ❌ 需生成 | `python data/generate_tsp_data.py --num_nodes 50 --num_samples 1000 --output_file data/tsp50_test.txt` |
+| tsp100_test.txt | ✅ 1000条 | — |
 
 ---
 
@@ -138,8 +142,8 @@ sheet/final_project/
 | weight_decay | 1e-4 | — |
 | epochs | 50 | — |
 | warmup_steps | 1000 | — |
-| n_layers | 4 | GNN 层数 |
-| hidden_dim | 128 | — |
+| n_layers | 12 | GNN 层数（DIFUSCO 论文值）|
+| hidden_dim | 256 | 隐藏层维度（DIFUSCO 论文值）|
 | ema_decay | 0.999 | — |
 | grad_clip | 1.0 | max_norm |
 

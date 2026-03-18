@@ -86,10 +86,17 @@ def evaluate(args):
     saved_args = ckpt.get('args', {})
 
     # mode / encoder 优先从 checkpoint 读取，允许手动覆盖
-    mode         = args.mode or ckpt.get('mode') or saved_args.get('mode', 'flow_matching')
+    mode = args.mode or ckpt.get('mode') or saved_args.get('mode')
+    if mode is None:
+        mode = 'flow_matching'
+        print('WARNING: mode not found in checkpoint, defaulting to flow_matching. '
+              'Use --mode to override if this is wrong.')
+    elif args.mode is None:
+        print(f'INFO: mode inferred from checkpoint: {mode}')
+
     encoder_type = saved_args.get('encoder_type', 'gated_gcn')
-    n_layers     = saved_args.get('n_layers', 4)
-    hidden_dim   = saved_args.get('hidden_dim', 128)
+    n_layers     = saved_args.get('n_layers', 12)
+    hidden_dim   = saved_args.get('hidden_dim', 256)
     T            = saved_args.get('T', 1000)
 
     # 推理步数：命令行优先，否则按 mode 使用默认值
@@ -160,6 +167,9 @@ def evaluate(args):
             if valid:
                 gap = compute_gap(pred, opt, c)
                 all_gaps.append(gap)
+            else:
+                # 无效 tour 不参与 gap 统计，但会在最终报告中单独列出
+                pass
 
         # 进度打印（每 10 batch 一次）
         if (batch_idx + 1) % 10 == 0:
@@ -168,12 +178,13 @@ def evaluate(args):
                   f'{sum(all_gaps)/len(all_gaps):.2f}%' if all_gaps else '')
 
     # 汇总统计
-    n_total   = len(dataset)
-    n_valid   = sum(all_valid)
-    avg_gap   = sum(all_gaps) / len(all_gaps) if all_gaps else float('nan')
-    best_gap  = min(all_gaps) if all_gaps else float('nan')
-    worst_gap = max(all_gaps) if all_gaps else float('nan')
-    avg_ms    = total_infer_time / n_total * 1000
+    n_total    = len(dataset)
+    n_valid    = sum(all_valid)
+    n_invalid  = n_total - n_valid
+    avg_gap    = sum(all_gaps) / len(all_gaps) if all_gaps else float('nan')
+    best_gap   = min(all_gaps) if all_gaps else float('nan')
+    worst_gap  = max(all_gaps) if all_gaps else float('nan')
+    avg_ms     = total_infer_time / n_total * 1000
 
     import statistics
     std_gap = statistics.stdev(all_gaps) if len(all_gaps) > 1 else 0.0
@@ -186,6 +197,9 @@ def evaluate(args):
     print(f'  Mode               : {mode}')
     print(f'  Encoder            : {encoder_type}')
     print(f'  Avg Optimality Gap : {avg_gap:.2f}% ± {std_gap:.2f}%')
+    print(f'    (computed on {n_valid} valid tours only)')
+    if n_invalid > 0:
+        print(f'  INVALID Tours      : {n_invalid}/{n_total} ({n_invalid/n_total*100:.1f}%) — EXCLUDED from gap')
     print(f'  Best Gap           : {best_gap:.2f}%')
     print(f'  Worst Gap          : {worst_gap:.2f}%')
     print(f'  Valid Tour Rate    : {n_valid}/{n_total} ({n_valid/n_total*100:.1f}%)')
@@ -202,6 +216,7 @@ def evaluate(args):
         'inference_steps': inference_steps,
         'n_total':         n_total,
         'n_valid':         n_valid,
+        'n_invalid':       n_invalid,
         'avg_gap':         avg_gap,
         'std_gap':         std_gap,
         'best_gap':        best_gap,

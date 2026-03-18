@@ -20,10 +20,14 @@ echo " Checkpoint: $CHECKPOINT"
 echo "============================================"
 
 for scale in 20 50 100; do
-    if [ "$scale" -eq 100 ]; then
-        DATA="data/tsp100_test.txt"
-    else
-        DATA="data/tsp${scale}_train.txt"
+    # 所有规模都用独立测试集（不是训练集）
+    DATA="data/tsp${scale}_test.txt"
+
+    # 若测试集不存在，自动生成
+    if [ ! -f "$DATA" ]; then
+        echo "Generating TSP-${scale} test set (500 instances)..."
+        python data/generate_tsp_data.py \
+            --num_nodes "$scale" --num_samples 500 --output_file "$DATA"
     fi
 
     if [ ! -f "$DATA" ]; then

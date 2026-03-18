@@ -126,10 +126,8 @@ class GatedGCNLayer(nn.Module):
         self.B = nn.Linear(d, d, bias=False)
         self.U = nn.Linear(d, d, bias=False)
         self.V = nn.Linear(d, d, bias=False)
-        # 边更新
+        # 边更新（与 DIFUSCO 一致：共享 Ah_i + Bh_j + Ce_ij，无额外线性层）
         self.C = nn.Linear(d, d, bias=False)
-        # 边特征输出（用于下一层）
-        self.edge_out = nn.Linear(d, d, bias=False)
 
         self.bn_node = nn.BatchNorm1d(d)
         self.bn_edge = nn.BatchNorm1d(d)
@@ -161,12 +159,11 @@ class GatedGCNLayer(nn.Module):
         agg = (gate_ij * Vh_j[:, None, :, :]).sum(dim=2)  # (B, N, d)
         h_new = F.relu(self.U(h) + agg)            # (B, N, d)
 
-        # 边特征更新：e_ij_new = ReLU(gate_input)（共用同样的线性组合）
-        e_new = F.relu(self.edge_out(gate_input))  # (B, N, N, d)
-
+        # 边特征更新：e_ij_new = ReLU(BN(Ah_i + Bh_j + Ce_ij))
+        # 与 DIFUSCO 一致：直接复用 gate_input，无额外线性变换
         # BatchNorm（需要 reshape 为 2D）
         h_new = self.bn_node(h_new.view(B * N, d)).view(B, N, d)
-        e_new = self.bn_edge(e_new.view(B * N * N, d)).view(B, N, N, d)
+        e_new = F.relu(self.bn_edge(gate_input.view(B * N * N, d)).view(B, N, N, d))
 
         # 残差连接
         h_new = h_new + h
@@ -252,9 +249,8 @@ class SimpleGCNLayer(nn.Module):
         w = e.norm(dim=-1, keepdim=True)          # (B, N, N, 1)
         w = F.softmax(w, dim=2)                   # 按出边归一化
 
-        # 加权聚合邻居
-        agg = (w * h[:, None, :, :]).sum(dim=2)   # (B, N, d)  ← 错误维度
-        # 修正：h_j broadcast 到 (B, N, N, d)
+        # 加权聚合邻居：sum_j w_{ij} * h_j
+        # w: (B,N,N,1), h[:,None,:,:]: (B,1,N,d) → broadcast → (B,N,N,d), sum(dim=2) → (B,N,d)
         agg = (w * h[:, None, :, :]).sum(dim=2)   # (B, N, d)
 
         h_new = F.relu(self.W(h + agg))
@@ -279,8 +275,8 @@ class GNNEncoder(nn.Module):
 
     def __init__(
         self,
-        n_layers: int = 4,
-        hidden_dim: int = 128,
+        n_layers: int = 12,
+        hidden_dim: int = 256,
         encoder_type: str = 'gated_gcn',
     ):
         super().__init__()

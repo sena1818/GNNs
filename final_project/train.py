@@ -228,8 +228,10 @@ def parse_args():
     # 模型结构
     p.add_argument('--encoder_type', type=str, default='gated_gcn',
                    choices=['gated_gcn', 'gat', 'gcn'])
-    p.add_argument('--n_layers',   type=int, default=4)
-    p.add_argument('--hidden_dim', type=int, default=128)
+    p.add_argument('--n_layers',   type=int, default=12,
+                   help='GNN 层数，DIFUSCO 论文用 12')
+    p.add_argument('--hidden_dim', type=int, default=256,
+                   help='隐藏层维度，DIFUSCO 论文用 256')
     p.add_argument('--T',          type=int, default=1000,
                    help='扩散步数，仅 discrete_ddpm / continuous_ddpm 使用')
     p.add_argument('--inference_steps', type=int, default=None,

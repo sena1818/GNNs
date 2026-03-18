@@ -318,16 +318,18 @@ class GaussianDiffusion:
     @staticmethod
     def scale_x0(x0: torch.Tensor) -> torch.Tensor:
         """
-        {0,1} → {-1,+1} 缩放 + 微量抖动（DIFUSCO 约定）。
+        {0,1} → {-1,+1} 缩放（与 DIFUSCO 一致）。
+
+        DIFUSCO 原始代码在此处加入随机抖动（* (1 + 0.05*rand)），但这会导致
+        验证集 loss 在相同 checkpoint 下不可复现，影响模型选择。此处去掉抖动，
+        保持确定性。数值上等价于 DIFUSCO 无抖动模式。
 
         Args:
             x0: (B, N, N) 原始邻接矩阵 {0,1}
         Returns:
-            x0_scaled: (B, N, N) 缩放后，值域约 {-1.05, +1.05}
+            x0_scaled: (B, N, N) 缩放后，值域 {-1, +1}
         """
-        x0_scaled = x0 * 2.0 - 1.0                            # {0,1} → {-1,+1}
-        x0_scaled = x0_scaled * (1.0 + 0.05 * torch.rand_like(x0_scaled))
-        return x0_scaled
+        return x0 * 2.0 - 1.0
 
     # ------------------------------------------------------------------
     # 前向过程：训练时用
