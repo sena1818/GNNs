@@ -127,6 +127,7 @@ def train(args):
     # 保存目录
     os.makedirs(args.save_dir, exist_ok=True)
     best_val_loss = float('inf')
+    start_epoch = 1
     history = {
         'mode': args.mode,
         'encoder_type': args.encoder_type,
@@ -135,9 +136,25 @@ def train(args):
         'lr': [],
     }
 
+    # ------ 续训：从 checkpoint 恢复 ------
+    if args.resume:
+        ckpt_path = args.resume
+        print(f'Resuming from {ckpt_path}')
+        ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
+        model.load_state_dict(ckpt['model_state'])
+        ema_model.load_state_dict(ckpt['ema_state'])
+        optimizer.load_state_dict(ckpt['optimizer_state'])
+        start_epoch = ckpt['epoch'] + 1
+        best_val_loss = ckpt['val_loss']
+        print(f'  Resumed from epoch {ckpt["epoch"]}, best_val_loss={best_val_loss:.6f}')
+        # 读取已有历史，追加而不是覆盖
+        hist_path = os.path.join(args.save_dir, 'history.json')
+        if os.path.exists(hist_path):
+            history = json.load(open(hist_path))
+
     # --------------- 训练循环 ---------------
-    global_step = 0
-    for epoch in range(1, args.epochs + 1):
+    global_step = (start_epoch - 1) * len(train_loader)
+    for epoch in range(start_epoch, start_epoch + args.epochs):
         model.train()
         t0 = time.time()
         epoch_loss = 0.0
@@ -148,6 +165,11 @@ def train(args):
 
             # 三种 mode 的 compute_loss 接口完全相同
             loss = model.compute_loss(coords, adj_0)
+
+            # 安全保护：跳过异常 batch，避免权重污染
+            if not torch.isfinite(loss):
+                global_step += 1
+                continue
 
             optimizer.zero_grad()
             loss.backward()
@@ -202,9 +224,9 @@ def train(args):
         if epoch % 10 == 0:
             torch.save(ckpt, os.path.join(args.save_dir, f'epoch{epoch:03d}.pt'))
 
-    # 保存训练历史（用于画 loss 曲线）
-    with open(os.path.join(args.save_dir, 'history.json'), 'w') as f:
-        json.dump(history, f, indent=2)
+        # 每 epoch 覆盖一次历史（续训时追加到已有历史）
+        with open(os.path.join(args.save_dir, 'history.json'), 'w') as f:
+            json.dump(history, f, indent=2)
 
     print(f'\nDone. Best val loss: {best_val_loss:.4f}')
     print(f'Checkpoint: {args.save_dir}/best.pt')
@@ -239,11 +261,13 @@ def parse_args():
 
     # 训练超参数
     p.add_argument('--batch_size',   type=int,   default=64)
-    p.add_argument('--lr',           type=float, default=2e-4)
-    p.add_argument('--weight_decay', type=float, default=1e-4)
+    p.add_argument('--lr',           type=float, default=1e-4)
+    p.add_argument('--weight_decay', type=float, default=0.0)
     p.add_argument('--epochs',       type=int,   default=50)
     p.add_argument('--warmup_steps', type=int,   default=1000)
     p.add_argument('--ema_decay',    type=float, default=0.999)
+    p.add_argument('--resume', type=str, default=None,
+                   help='从指定 checkpoint 续训，例如 checkpoints/discrete_ddpm_gated_gcn/best.pt')
 
     args = p.parse_args()
 

@@ -195,6 +195,9 @@ class TSPDiffusionModel(nn.Module):
         t_norm = t.float() / self.T
         pred_logits = self.encoder(coords, x_t, t_norm)            # (B,N,N)
 
+        # clamp 防止 fp32 溢出：exp(88) ≈ 1.65e38 是 float32 上限
+        pred_logits = pred_logits.clamp(-20.0, 20.0)
+
         return F.binary_cross_entropy_with_logits(pred_logits, adj_0)
 
     def _d3pm_sample(self, coords: torch.Tensor, steps: int) -> torch.Tensor:
@@ -223,10 +226,8 @@ class TSPDiffusionModel(nn.Module):
 
             pred_logits = self.encoder(coords, x, t_norm)          # (B,N,N)
 
-            t_prev_tensor = torch.full((B,), t_prev_val, dtype=torch.long, device=device)
-
             if t_prev_val > 0:
-                # 继续去噪：采样 x_{t-1}
+                # 继续去噪
                 x = self.scheduler.posterior_sample(x, pred_logits, t_tensor)
             # t_prev=0 时不再采样，直接用最终 pred_logits 作为输出
 

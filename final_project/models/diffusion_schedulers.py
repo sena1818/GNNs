@@ -239,7 +239,7 @@ class BernoulliDiffusion:
         num_0 = step_from_0 * q_tm1_0                  # ∝ p(x_{t-1}=0 | x_t)
 
         # 归一化后验概率，采样
-        post_prob = num_1 / (num_1 + num_0 + 1e-10)
+        post_prob = (num_1 / (num_1 + num_0 + 1e-10)).clamp(0.0, 1.0)
         return torch.bernoulli(post_prob)               # {0.0, 1.0}
 
     def get_inference_timesteps(self, num_steps: int = 50) -> list:
