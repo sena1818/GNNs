@@ -219,6 +219,12 @@ class GNNEncoder(nn.Module):
              e = e + time_proj_i(t_feat)    ← 每层将时间特征加到边上
         5. 输出头: LN → ReLU → Linear(d,1) → squeeze → (B, N, N)
 
+    与 DIFUSCO 官方的已知差异:
+        官方每层 GNN 后还有一个 per_layer_out[i] = LN → ReLU → Linear(d,d)，
+        以残差形式作用于边特征（e = e + per_layer_out[i](e)）。
+        该模块占官方总参数的约 15%（795K / 5.3M），是我们与官方性能差距的主要来源。
+        此处为简化实现有意省略。
+
     encoder_type 可选（消融实验用）:
         'gated_gcn'  门控图卷积，节点与边均更新（默认）
         'gat'        多头图注意力，仅更新节点
