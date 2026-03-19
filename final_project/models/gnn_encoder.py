@@ -1,16 +1,25 @@
 """
-GNN 编码器模块 — 门控图卷积 (Gated GCN) + GAT + SimpleGCN
+GNN 编码器模块 — 对齐 DIFUSCO 官方 + Flow Matching 扩展
 
-参考: DIFUSCO (NeurIPS 2023), Edward-Sun/DIFUSCO
+与 DIFUSCO 官方 (difusco/models/gnn_encoder.py) 的对齐项:
+  ✅ PositionEmbeddingSine (normalize=True, 2π 缩放)
+  ✅ ScalarEmbeddingSine (边特征正弦编码)
+  ✅ time_embed_dim = hidden_dim // 2
+  ✅ time_embed: Linear(d, d//2) → ReLU → Linear(d//2, d//2)
+  ✅ time_embed_layers: ReLU → Linear(d//2, d) (per-layer)
+  ✅ per_layer_out: LayerNorm → SiLU → zero_module(Linear) (per-layer)
+  ✅ GNNLayer: mode="direct" (无内部残差) + 外部残差
+  ✅ Output head: GroupNorm32(32) → ReLU → Conv2d(d, out_channels, 1)
+  ✅ out_channels=2 for categorical, 1 for gaussian/FM
 
-模块结构:
-  sinusoidal_embedding  — 标量 → 正弦位置编码向量
-  CoordEmbedding        — 节点坐标 (x,y) → sinusoidal → Linear → ReLU
-  EdgeEmbedding         — 边特征 [dist, sinusoidal(adj_t)] → Linear → ReLU
-  GatedGCNLayer         — 门控图卷积: sigmoid 门控 + LayerNorm + 残差
-  GATLayer              — 多头图注意力: scaled dot-product + 边偏置 + 残差
-  SimpleGCNLayer        — 轻量图卷积: 边范数软注意力聚合 + 残差
-  GNNEncoder            — 完整编码器: 嵌入 + n 层 GNN + 时间逐层注入 + 输出头
+本项目扩展 (DIFUSCO 官方没有的):
+  ✅ GATLayer — 多头注意力层 (消融实验)
+  ✅ SimpleGCNLayer — 轻量 GCN (消融实验)
+  ✅ encoder_type 参数控制层类型
+
+参考:
+  - DIFUSCO (NeurIPS 2023) difusco/models/gnn_encoder.py
+  - Bresson & Laurent, 2017 (Gated GCN)
 """
 
 import math
@@ -18,100 +27,108 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from .nn_utils import normalization, zero_module, timestep_embedding
 
-def sinusoidal_embedding(t: torch.Tensor, dim: int) -> torch.Tensor:
+
+# =============================================================================
+# 位置编码 (与 DIFUSCO 官方对齐)
+# =============================================================================
+
+class PositionEmbeddingSine(nn.Module):
     """
-    将标量 t ∈ [0,1] 编码为 dim 维正弦向量。
+    节点坐标正弦位置编码 — 与 DIFUSCO 官方完全一致。
 
-    与 Transformer 位置编码相同的公式:
-        emb[2i]   = sin(t * 10000^(-i / half))
-        emb[2i+1] = cos(t * 10000^(-i / half))
+    将 (x, y) ∈ [0,1]² 编码为 hidden_dim 维向量:
+      1. normalize=True 时: coords *= 2π
+      2. 对每个坐标分量做正弦编码: sin/cos 交错排列
+      3. 拼接 pos_y 和 pos_x
 
-    Args:
-        t:   (B,) 时间步，浮点数
-        dim: 输出维度，必须为偶数
-    Returns:
-        emb: (B, dim)
+    输入: (B, N, 2) → 输出: (B, N, num_pos_feats*2 = hidden_dim)
     """
-    assert dim % 2 == 0
-    half = dim // 2
-    freqs = torch.exp(
-        -math.log(10000) * torch.arange(half, dtype=torch.float32, device=t.device) / half
-    )
-    args = t[:, None] * freqs[None, :]
-    return torch.cat([torch.sin(args), torch.cos(args)], dim=-1)
-
-
-class CoordEmbedding(nn.Module):
-    """
-    节点坐标嵌入。
-
-    将 (x, y) 各自做 sinusoidal 编码后拼接，再经 Linear + ReLU 投影到 hidden_dim。
-    输入: coords (B, N, 2)，值域 [0,1]
-    输出: (B, N, hidden_dim)
-    """
-    def __init__(self, hidden_dim: int):
+    def __init__(self, num_pos_feats=64, temperature=10000, normalize=False, scale=None):
         super().__init__()
-        assert hidden_dim % 4 == 0
-        self.hidden_dim = hidden_dim
-        self.proj = nn.Linear(hidden_dim, hidden_dim)
+        self.num_pos_feats = num_pos_feats
+        self.temperature = temperature
+        self.normalize = normalize
+        if scale is not None and normalize is False:
+            raise ValueError("normalize should be True if scale is passed")
+        if scale is None:
+            scale = 2 * math.pi
+        self.scale = scale
 
-    def forward(self, coords: torch.Tensor) -> torch.Tensor:
-        half = self.hidden_dim // 4
-        freqs = torch.exp(
-            -math.log(10000) * torch.arange(half, dtype=torch.float32, device=coords.device) / half
+    def forward(self, x):
+        # x: (B, N, 2), x[:,:,0] = y_coord, x[:,:,1] = x_coord (DIFUSCO 约定)
+        y_embed = x[:, :, 0]
+        x_embed = x[:, :, 1]
+        if self.normalize:
+            y_embed = y_embed * self.scale
+            x_embed = x_embed * self.scale
+
+        dim_t = torch.arange(self.num_pos_feats, dtype=torch.float32, device=x.device)
+        dim_t = self.temperature ** (
+            2.0 * (torch.div(dim_t, 2, rounding_mode='trunc')) / self.num_pos_feats
         )
-        x_args = coords[..., 0:1] * freqs          # (B, N, half)
-        y_args = coords[..., 1:2] * freqs          # (B, N, half)
-        emb = torch.cat([
-            torch.sin(x_args), torch.cos(x_args),
-            torch.sin(y_args), torch.cos(y_args),
-        ], dim=-1)                                  # (B, N, hidden_dim)
-        return F.relu(self.proj(emb))
+
+        pos_x = x_embed[:, :, None] / dim_t              # (B, N, num_pos_feats)
+        pos_y = y_embed[:, :, None] / dim_t
+        pos_x = torch.stack(
+            (pos_x[:, :, 0::2].sin(), pos_x[:, :, 1::2].cos()), dim=3
+        ).flatten(2)
+        pos_y = torch.stack(
+            (pos_y[:, :, 0::2].sin(), pos_y[:, :, 1::2].cos()), dim=3
+        ).flatten(2)
+        pos = torch.cat((pos_y, pos_x), dim=2).contiguous()
+        return pos  # (B, N, num_pos_feats * 2 = hidden_dim)
 
 
-class EdgeEmbedding(nn.Module):
+class ScalarEmbeddingSine(nn.Module):
     """
-    边特征嵌入。
+    标量正弦嵌入 — 用于边特征 (adj_t 值) 的正弦编码。
+    与 DIFUSCO 官方完全一致。
 
-    对每条边 (i,j) 拼接两部分特征:
-      - dist(i,j): 欧氏距离标量，直接作为线性特征
-      - sinusoidal(adj_t[i,j]): 当前扩散状态做正弦编码，捕捉连续/离散信号
-    拼接后经 Linear(hidden_dim+1, hidden_dim) + ReLU 投影。
-    输入: coords (B, N, 2), adj_t (B, N, N)
-    输出: (B, N, N, hidden_dim)
+    输入: (B, N, N) → 输出: (B, N, N, num_pos_feats)
     """
-    def __init__(self, hidden_dim: int):
+    def __init__(self, num_pos_feats=64, temperature=10000, normalize=False, scale=None):
         super().__init__()
-        assert hidden_dim % 2 == 0
-        self.hidden_dim = hidden_dim
-        self.proj = nn.Linear(hidden_dim + 1, hidden_dim)
+        self.num_pos_feats = num_pos_feats
+        self.temperature = temperature
+        self.normalize = normalize
+        if scale is not None and normalize is False:
+            raise ValueError("normalize should be True if scale is passed")
+        if scale is None:
+            scale = 2 * math.pi
+        self.scale = scale
 
-    def forward(self, coords: torch.Tensor, adj_t: torch.Tensor) -> torch.Tensor:
-        diff = coords[:, :, None, :] - coords[:, None, :, :]
-        dist = diff.norm(dim=-1, keepdim=True)          # (B, N, N, 1)
-        half = self.hidden_dim // 2
-        freqs = torch.exp(
-            -math.log(10000) * torch.arange(half, dtype=torch.float32, device=coords.device) / half
+    def forward(self, x):
+        # x: (B, N, N) — 扩散状态 adj_t
+        x_embed = x
+        dim_t = torch.arange(self.num_pos_feats, dtype=torch.float32, device=x.device)
+        dim_t = self.temperature ** (
+            2 * torch.div(dim_t, 2, rounding_mode='trunc') / self.num_pos_feats
         )
-        adj_args = adj_t.unsqueeze(-1) * freqs          # (B, N, N, half)
-        adj_emb = torch.cat([torch.sin(adj_args), torch.cos(adj_args)], dim=-1)  # (B,N,N,hidden_dim)
-        edge_feat = torch.cat([dist, adj_emb], dim=-1)  # (B, N, N, hidden_dim+1)
-        return F.relu(self.proj(edge_feat))
+        pos_x = x_embed[:, :, :, None] / dim_t           # (B, N, N, num_pos_feats)
+        pos_x = torch.stack(
+            (pos_x[:, :, :, 0::2].sin(), pos_x[:, :, :, 1::2].cos()), dim=4
+        ).flatten(3)
+        return pos_x  # (B, N, N, num_pos_feats)
 
+
+# =============================================================================
+# GNN 层 (与 DIFUSCO 官方对齐)
+# =============================================================================
 
 class GatedGCNLayer(nn.Module):
     """
-    门控图卷积层 (Bresson & Laurent, 2017)。
+    门控图卷积层 (Bresson & Laurent, 2017) — 与 DIFUSCO GNNLayer 对齐。
 
     边门控: gate_ij = sigmoid(A·h_i + B·h_j + C·e_ij)
-    节点更新: h_i = ReLU(LN(U·h_i + Σ_j gate_ij · V·h_j)) + h_i
-    边更新:   e_ij = ReLU(LN(gate_input_ij)) + e_ij
+    节点更新: h = norm(U·h_i + Σ_j gate_ij · V·h_j) → ReLU
+    边更新:   e = norm(gate_input) → ReLU
 
-    所有线性层带 bias，归一化使用 LayerNorm，更新顺序为 linear → LN → ReLU → 残差。
+    注意: 不含内部残差连接！残差在 GNNEncoder.forward() 中外部处理。
+    这与 DIFUSCO 官方 mode="direct" 一致。
     """
-
-    def __init__(self, hidden_dim: int):
+    def __init__(self, hidden_dim: int, norm: str = 'layer', learn_norm: bool = True):
         super().__init__()
         d = hidden_dim
         self.A = nn.Linear(d, d, bias=True)
@@ -119,40 +136,74 @@ class GatedGCNLayer(nn.Module):
         self.C = nn.Linear(d, d, bias=True)
         self.U = nn.Linear(d, d, bias=True)
         self.V = nn.Linear(d, d, bias=True)
-        self.norm_h = nn.LayerNorm(d)
-        self.norm_e = nn.LayerNorm(d)
 
-    def forward(self, h: torch.Tensor, e: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        # DIFUSCO 默认 norm="layer" with elementwise_affine=learn_norm
+        if norm == 'layer':
+            self.norm_h = nn.LayerNorm(d, elementwise_affine=learn_norm)
+            self.norm_e = nn.LayerNorm(d, elementwise_affine=learn_norm)
+        elif norm == 'batch':
+            self.norm_h = nn.BatchNorm1d(d, affine=learn_norm)
+            self.norm_e = nn.BatchNorm1d(d, affine=learn_norm)
+        else:
+            self.norm_h = None
+            self.norm_e = None
+
+    def forward(self, h: torch.Tensor, e: torch.Tensor) -> tuple:
+        """
+        Args:
+            h: (B, N, d) 节点特征
+            e: (B, N, N, d) 边特征
+        Returns:
+            h_out, e_out: 更新后的特征 (无残差)
+        """
         B, N, d = h.shape
 
+        Uh = self.U(h)   # (B, N, d)
+
+        # V(h) 展开为 (B, 1, N, d) — 表示 "节点 j 的特征，对所有 i"
+        Vh = self.V(h).unsqueeze(1).expand(-1, N, -1, -1)  # (B, N, N, d)
+
+        # 边门控
         gate_input = (
-            self.A(h)[:, :, None, :] +
-            self.B(h)[:, None, :, :] +
-            self.C(e)
+            self.A(h)[:, :, None, :] +  # source: (B, N, 1, d)
+            self.B(h)[:, None, :, :] +  # target: (B, 1, N, d)
+            self.C(e)                    # edge:   (B, N, N, d)
         )
-        gate_ij = torch.sigmoid(gate_input)
+        gates = torch.sigmoid(gate_input)   # (B, N, N, d)
 
-        # 节点: linear → LN → ReLU → 残差
-        agg = (gate_ij * self.V(h)[:, None, :, :]).sum(dim=2)
-        h_new = F.relu(self.norm_h(self.U(h) + agg)) + h
+        # 节点聚合: sum over j
+        agg = (gates * Vh).sum(dim=2)   # (B, N, d)
+        h_out = Uh + agg
 
-        # 边: linear → LN → ReLU → 残差
-        e_new = F.relu(self.norm_e(gate_input)) + e
+        # 归一化
+        if self.norm_h is not None:
+            if isinstance(self.norm_h, nn.BatchNorm1d):
+                h_out = self.norm_h(h_out.view(B * N, d)).view(B, N, d)
+            else:
+                h_out = self.norm_h(h_out)
+        if self.norm_e is not None:
+            if isinstance(self.norm_e, nn.BatchNorm1d):
+                gate_input = self.norm_e(
+                    gate_input.view(B * N * N, d)
+                ).view(B, N, N, d)
+            else:
+                gate_input = self.norm_e(gate_input)
 
-        return h_new, e_new
+        # ReLU (在残差之前)
+        h_out = F.relu(h_out)
+        e_out = F.relu(gate_input)
+
+        return h_out, e_out
 
 
 class GATLayer(nn.Module):
     """
-    多头图注意力层（稠密邻接矩阵实现）。
+    多头图注意力层 — 本项目扩展，用于消融实验。
+    DIFUSCO 官方没有此层。
 
-    节点更新: scaled dot-product attention，注意力分数加边特征线性偏置
-      scores_ij = (Q_i · K_j) / sqrt(d_head) + W_e · e_ij
-      h_i = ReLU(LN(out_proj(Σ_j softmax(scores)_ij · V_j))) + h_i
-    边特征透传不更新。
-    用于消融实验，对比 GatedGCN vs GAT。
+    [IMPROVEMENT] 扩展: 多头注意力替代门控 GCN，测试不同聚合机制的效果。
     """
-    def __init__(self, hidden_dim: int, heads: int = 4):
+    def __init__(self, hidden_dim: int, heads: int = 4, **kwargs):
         super().__init__()
         assert hidden_dim % heads == 0
         self.heads = heads
@@ -164,7 +215,7 @@ class GATLayer(nn.Module):
         self.out_proj = nn.Linear(hidden_dim, hidden_dim, bias=True)
         self.norm = nn.LayerNorm(hidden_dim)
 
-    def forward(self, h: torch.Tensor, e: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, h: torch.Tensor, e: torch.Tensor) -> tuple:
         B, N, d = h.shape
         H, Hd = self.heads, self.head_dim
         Q = self.W_q(h).view(B, N, H, Hd).transpose(1, 2)
@@ -173,131 +224,195 @@ class GATLayer(nn.Module):
         scores = (Q @ K.transpose(-2, -1)) / math.sqrt(Hd)
         scores = scores + self.W_e(e).permute(0, 3, 1, 2)
         out = (F.softmax(scores, dim=-1) @ V).transpose(1, 2).contiguous().view(B, N, d)
-        h_new = F.relu(self.norm(self.out_proj(out))) + h
-        return h_new, e
+        h_out = F.relu(self.norm(self.out_proj(out)))
+        # 不更新边特征，返回原始 e (edge features pass-through)
+        return h_out, e
 
 
 class SimpleGCNLayer(nn.Module):
     """
-    最轻量图卷积层，用于消融实验对比 GatedGCN vs SimpleGCN。
+    轻量图卷积层 — 本项目扩展，用于消融实验。
+    DIFUSCO 官方没有此层。
 
-    节点更新: h_i = relu(LN(W * (h_i + sum_j(w_ij * h_j)))) + h_i
-    聚合权重: w_ij = softmax(||e_ij||)  (边特征 L2 范数作软注意力)
-    边特征: 不更新，直接透传
+    [IMPROVEMENT] 扩展: 最简 GCN 作为下界基线。
     """
-    def __init__(self, hidden_dim: int):
+    def __init__(self, hidden_dim: int, **kwargs):
         super().__init__()
         self.W = nn.Linear(hidden_dim, hidden_dim, bias=True)
         self.norm = nn.LayerNorm(hidden_dim)
 
-    def forward(self, h: torch.Tensor, e: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, h: torch.Tensor, e: torch.Tensor) -> tuple:
         w = F.softmax(e.norm(dim=-1, keepdim=True), dim=2)
         agg = (w * h[:, None, :, :]).sum(dim=2)
-        h_new = F.relu(self.norm(self.W(h + agg))) + h
-        return h_new, e
+        h_out = F.relu(self.norm(self.W(h + agg)))
+        return h_out, e
 
+
+# =============================================================================
+# GNN 编码器 (与 DIFUSCO 官方对齐)
+# =============================================================================
 
 class GNNEncoder(nn.Module):
     """
-    多层 GNN 编码器，将 TSP 图编码为边概率热图。
+    多层 GNN 编码器 — 对齐 DIFUSCO 官方 dense_forward 路径。
 
-    输入:
-        coords  (B, N, 2)   城市坐标，值域 [0,1]
-        adj_t   (B, N, N)   当前扩散状态（FM: 连续插值；D3PM: {0,1}；DDPM: 连续）
-        t       (B,)        归一化时间步，值域 (0,1]
-    输出:
-        (B, N, N)   逐边预测值（速度场 / 噪声 / x0 logits，由上层 diffusion 模型解释）
+    架构:
+      1. 节点嵌入: PositionEmbeddingSine(d//2, normalize=True) → Linear(d, d)
+      2. 边嵌入:   ScalarEmbeddingSine(d) → Linear(d, d)
+      3. 时间嵌入: timestep_embedding(d) → Linear(d, d//2) → ReLU → Linear(d//2, d//2)
+      4. n_layers × {
+            x_in, e_in = x, e
+            x, e = GNNLayer(x, e)                    # mode="direct", 无内部残差
+            e = e + time_embed_layers[i](t_feat)      # 时间注入到边
+            x = x_in + x                              # 外部节点残差
+            e = e_in + per_layer_out[i](e)             # 外部边残差 + 学习门控
+         }
+      5. Output: GroupNorm32(32, d) → ReLU → Conv2d(d, out_channels, 1)
 
-    架构（5 步）:
-        1. 节点嵌入: CoordEmbedding → (B, N, d)
-             sinusoidal(x) ‖ sinusoidal(y) → Linear(d,d) → ReLU
-        2. 边嵌入: EdgeEmbedding → (B, N, N, d)
-             [dist, sinusoidal(adj_t)] → Linear(d+1, d) → ReLU
-        3. 时间嵌入: sinusoidal(t) → Linear(d,d) → ReLU → Linear(d,d) → (B, d)
-        4. n_layers × GNN:
-             h, e = GNNLayer(h, e)
-             e = e + time_proj_i(t_feat)    ← 每层将时间特征加到边上
-        5. 输出头: LN → ReLU → Linear(d,1) → squeeze → (B, N, N)
+    out_channels:
+      - categorical (D3PM): 2 (CrossEntropyLoss 两类输出)
+      - gaussian (DDPM): 1 (ε-prediction)
+      - flow_matching (FM): 1 (velocity-prediction)
 
-    与 DIFUSCO 官方的已知差异:
-        官方每层 GNN 后还有一个 per_layer_out[i] = LN → ReLU → Linear(d,d)，
-        以残差形式作用于边特征（e = e + per_layer_out[i](e)）。
-        该模块占官方总参数的约 15%（795K / 5.3M），是我们与官方性能差距的主要来源。
-        此处为简化实现有意省略。
-
-    encoder_type 可选（消融实验用）:
-        'gated_gcn'  门控图卷积，节点与边均更新（默认）
-        'gat'        多头图注意力，仅更新节点
-        'gcn'        轻量图卷积，仅更新节点
+    encoder_type 可选:
+      'gated_gcn' — 门控图卷积 (DIFUSCO 默认)
+      'gat'       — 多头注意力 (本项目扩展消融)
+      'gcn'       — 轻量 GCN (本项目扩展消融)
     """
 
     def __init__(
         self,
         n_layers: int = 12,
         hidden_dim: int = 256,
+        out_channels: int = 1,
         encoder_type: str = 'gated_gcn',
+        norm: str = 'layer',
+        learn_norm: bool = True,
     ):
         super().__init__()
         self.hidden_dim = hidden_dim
+        self.out_channels = out_channels
         self.encoder_type = encoder_type
+        time_embed_dim = hidden_dim // 2
 
-        self.node_emb = CoordEmbedding(hidden_dim)
-        self.edge_emb = EdgeEmbedding(hidden_dim)
+        # --- 位置编码 (DIFUSCO 一致) ---
+        self.pos_embed = PositionEmbeddingSine(hidden_dim // 2, normalize=True)
+        self.edge_pos_embed = ScalarEmbeddingSine(hidden_dim, normalize=False)
 
-        # 时间嵌入: 2 层 MLP，sinusoidal → Linear → ReLU → Linear
+        # --- 嵌入投影 (DIFUSCO 一致) ---
+        self.node_embed = nn.Linear(hidden_dim, hidden_dim)
+        self.edge_embed = nn.Linear(hidden_dim, hidden_dim)
+
+        # --- 时间嵌入 (DIFUSCO 一致: d → d//2 → ReLU → d//2) ---
         self.time_embed = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
+            nn.Linear(hidden_dim, time_embed_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
+            nn.Linear(time_embed_dim, time_embed_dim),
         )
 
-        # 每层对应一个时间投影（注入到边特征）
-        self.time_proj_layers = nn.ModuleList([
-            nn.Linear(hidden_dim, hidden_dim) for _ in range(n_layers)
+        # --- 每层时间投影 (DIFUSCO 一致: ReLU → d//2 → d) ---
+        self.time_embed_layers = nn.ModuleList([
+            nn.Sequential(
+                nn.ReLU(),
+                nn.Linear(time_embed_dim, hidden_dim),
+            ) for _ in range(n_layers)
         ])
 
-        layer_cls = {'gated_gcn': GatedGCNLayer, 'gat': GATLayer, 'gcn': SimpleGCNLayer}[encoder_type]
-        self.layers = nn.ModuleList([layer_cls(hidden_dim) for _ in range(n_layers)])
+        # --- 每层边输出门控 (DIFUSCO 一致: LN → SiLU → zero_init Linear) ---
+        self.per_layer_out = nn.ModuleList([
+            nn.Sequential(
+                nn.LayerNorm(hidden_dim, elementwise_affine=learn_norm),
+                nn.SiLU(),
+                zero_module(nn.Linear(hidden_dim, hidden_dim)),
+            ) for _ in range(n_layers)
+        ])
 
-        # 输出头: LN → ReLU → Linear(d,1) → per-edge 标量
-        self.output_head = nn.Sequential(
-            nn.LayerNorm(hidden_dim),
+        # --- GNN 层 ---
+        layer_map = {
+            'gated_gcn': lambda: GatedGCNLayer(hidden_dim, norm=norm, learn_norm=learn_norm),
+            'gat': lambda: GATLayer(hidden_dim),
+            'gcn': lambda: SimpleGCNLayer(hidden_dim),
+        }
+        if encoder_type not in layer_map:
+            raise ValueError(f"Unknown encoder_type: {encoder_type}")
+        self.layers = nn.ModuleList([layer_map[encoder_type]() for _ in range(n_layers)])
+
+        # --- 输出头 (DIFUSCO 一致: GroupNorm32 → ReLU → Conv2d) ---
+        self.out = nn.Sequential(
+            normalization(hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, 1),
+            nn.Conv2d(hidden_dim, out_channels, kernel_size=1, bias=True),
         )
 
     def forward(
         self,
-        coords: torch.Tensor,   # (B, N, 2)  城市坐标
-        adj_t:  torch.Tensor,   # (B, N, N)  当前扩散状态
-        t:      torch.Tensor,   # (B,)       归一化时间步 ∈ (0,1]
-    ) -> torch.Tensor:          # (B, N, N)  速度场 / 噪声 / logits
-        B, N, _ = coords.shape
+        coords: torch.Tensor,   # (B, N, 2) 城市坐标
+        adj_t:  torch.Tensor,   # (B, N, N) 扩散状态 (已经过预处理)
+        t:      torch.Tensor,   # (B,) 时间步
+    ) -> torch.Tensor:
+        """
+        Args:
+            coords: (B, N, 2) 城市坐标 [0,1]²
+            adj_t:  (B, N, N) 当前扩散状态
+                    - categorical: {0,1} → ×2-1 → +jitter 后的连续值
+                    - gaussian: 连续值
+                    - FM: 连续值
+            t:      (B,) 时间步（DIFUSCO 用原始整数步，FM 用 [0,1] 浮点）
+        Returns:
+            categorical: (B, 2, N, N) 两类 logits
+            gaussian/FM: (B, 1, N, N) 单通道预测
+        """
+        # 1. 嵌入
+        x = self.node_embed(self.pos_embed(coords))       # (B, N, d)
+        e = self.edge_embed(self.edge_pos_embed(adj_t))    # (B, N, N, d)
 
-        # 1. 初始特征
-        h = self.node_emb(coords)           # (B, N, d)
-        e = self.edge_emb(coords, adj_t)    # (B, N, N, d)
+        # 2. 时间嵌入
+        time_emb = self.time_embed(
+            timestep_embedding(t, self.hidden_dim)
+        )  # (B, time_embed_dim)
 
-        # 2. 时间嵌入（2 层 MLP）
-        t_feat = self.time_embed(sinusoidal_embedding(t, self.hidden_dim))  # (B, d)
+        # 3. 图设为全连接 (与 DIFUSCO dense_forward 一致)
+        # DIFUSCO: graph = torch.ones_like(graph).long()
 
-        # 3. 多层 GNN，每层后注入时间到边特征
-        for i, layer in enumerate(self.layers):
-            h, e = layer(h, e)
-            e = e + self.time_proj_layers[i](t_feat)[:, None, None, :]  # (B, N, N, d)
+        # 4. GNN 层 — 外部残差模式 (DIFUSCO mode="direct")
+        for layer, time_layer, out_layer in zip(
+            self.layers, self.time_embed_layers, self.per_layer_out
+        ):
+            x_in, e_in = x, e
 
-        # 4. 输出
-        return self.output_head(e).squeeze(-1)  # (B, N, N)
+            x, e = layer(x, e)                               # 无内部残差
 
+            e = e + time_layer(time_emb)[:, None, None, :]    # 时间注入到边
+
+            x = x_in + x                                      # 外部节点残差
+            e = e_in + out_layer(e)                            # 外部边残差 + 学习门控
+
+        # 5. 输出头
+        # e: (B, N, N, d) → permute → (B, d, N, N) → Conv2d → (B, out_channels, N, N)
+        out = self.out(e.permute(0, 3, 1, 2))
+        return out
+
+
+# =============================================================================
+# 快速验证
+# =============================================================================
 
 if __name__ == '__main__':
     B, N = 2, 20
     coords = torch.rand(B, N, 2)
     adj_t = torch.rand(B, N, N)
-    t = torch.rand(B)
+    t = torch.rand(B) * 1000  # 模拟整数时间步
+
     for enc_type in ['gated_gcn', 'gat', 'gcn']:
-        model = GNNEncoder(n_layers=4, hidden_dim=128, encoder_type=enc_type)
-        out = model(coords, adj_t, t)
-        n_params = sum(p.numel() for p in model.parameters())
-        print(f'[{enc_type:12s}] output: {tuple(out.shape)}  params: {n_params:,}')
+        for oc in [1, 2]:
+            model = GNNEncoder(
+                n_layers=4, hidden_dim=128,
+                out_channels=oc, encoder_type=enc_type,
+            )
+            out = model(coords, adj_t, t)
+            n_params = sum(p.numel() for p in model.parameters())
+            print(
+                f'[{enc_type:12s} oc={oc}] '
+                f'output: {tuple(out.shape)}  params: {n_params:,}'
+            )
     print('GNNEncoder OK')

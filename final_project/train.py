@@ -1,35 +1,39 @@
 """
-训练入口脚本 — 三种扩散框架统一训练
+训练入口脚本 — 三种扩散框架统一训练 (对齐 DIFUSCO 超参数)
 
-支持三种 mode:
-  flow_matching   — 连续直线 ODE (FM)，默认推理 20 步
-  discrete_ddpm   — 离散伯努利扩散 (D3PM，DIFUSCO SOTA)，推理 50 步
-  continuous_ddpm — 连续高斯扩散 (DDPM，对照组)，推理 50 步
+DIFUSCO 官方超参数 (reproducing_scripts.md):
+  ✅ optimizer:     AdamW (不是 Adam)
+  ✅ learning_rate: 2e-4
+  ✅ weight_decay:  1e-4
+  ✅ lr_scheduler:  cosine-decay
+  ✅ batch_size:    64 (TSP50), 32 (TSP100)
+  ✅ num_epochs:    50
+  ✅ inference_schedule: cosine
+  ✅ inference_steps:    50
 
 用法:
-  # TSP-20 快速调试（5 epoch）
-  python train.py --mode flow_matching   --data_file data/tsp20_train.txt --epochs 5
+  # TSP-20 快速调试
+  python train.py --mode flow_matching --data_file data/tsp20_train.txt --epochs 5
 
-  # TSP-50 正式训练
-  python train.py --mode flow_matching   --data_file data/tsp50_train.txt --epochs 50
-  python train.py --mode discrete_ddpm   --data_file data/tsp50_train.txt --epochs 50
-  python train.py --mode continuous_ddpm --data_file data/tsp50_train.txt --epochs 50
+  # TSP-50 正式训练 (对齐 DIFUSCO)
+  python train.py --mode discrete_ddpm --data_file data/tsp50_train.txt
 
-  # 架构消融（在同一 mode 下换 encoder）
-  python train.py --mode flow_matching --encoder_type gat --data_file data/tsp50_train.txt
-  python train.py --mode flow_matching --encoder_type gcn --data_file data/tsp50_train.txt
-
-三种 mode 的训练循环完全相同（compute_loss 接口统一），
-差异只在模型初始化和 checkpoint 元数据中。
+  # 三方对比
+  python train.py --mode flow_matching   --data_file data/tsp50_train.txt
+  python train.py --mode discrete_ddpm   --data_file data/tsp50_train.txt
+  python train.py --mode continuous_ddpm --data_file data/tsp50_train.txt
 """
 
 import argparse
 import copy
 import os
+import random
 import sys
 import time
 import json
+import math
 
+import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, random_split
@@ -40,28 +44,30 @@ from models.tsp_model import TSPDiffusionModel
 
 
 # ---------------------------------------------------------------------------
-# EMA
+# EMA (与 DIFUSCO nn.py update_ema 一致)
 # ---------------------------------------------------------------------------
 
 def update_ema(ema_model: nn.Module, model: nn.Module, decay: float = 0.999):
-    """指数移动平均：ema_params = decay * ema_params + (1-decay) * params"""
+    """指数移动平均: ema_params = decay * ema_params + (1-decay) * params"""
     with torch.no_grad():
         for ema_p, p in zip(ema_model.parameters(), model.parameters()):
             ema_p.data.mul_(decay).add_(p.data, alpha=1.0 - decay)
 
 
 # ---------------------------------------------------------------------------
-# 学习率调度
+# 学习率调度 (对齐 DIFUSCO cosine-decay)
 # ---------------------------------------------------------------------------
 
-def get_lr_scheduler(optimizer, warmup_steps: int, total_steps: int):
-    """线性预热 → Cosine 衰减"""
-    import math
+def get_cosine_decay_scheduler(optimizer, total_steps: int, warmup_steps: int = 0):
+    """
+    Cosine decay with optional warmup.
+    DIFUSCO 官方用 cosine-decay via get_schedule_fn。
+    """
     def lr_lambda(step):
         if step < warmup_steps:
             return step / max(1, warmup_steps)
         progress = (step - warmup_steps) / max(1, total_steps - warmup_steps)
-        return 0.5 * (1.0 + math.cos(math.pi * progress))
+        return max(0.0, 0.5 * (1.0 + math.cos(math.pi * progress)))
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
 
@@ -70,6 +76,13 @@ def get_lr_scheduler(optimizer, warmup_steps: int, total_steps: int):
 # ---------------------------------------------------------------------------
 
 def train(args):
+    # 随机种子
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
+
     # 设备
     if torch.cuda.is_available():
         device = torch.device('cuda')
@@ -81,7 +94,7 @@ def train(args):
     print(f'Mode:   {args.mode}')
     print(f'Encoder:{args.encoder_type}')
 
-    # 数据集（90/10 划分）
+    # 数据集 (90/10 划分)
     dataset = TSPDataset(args.data_file)
     n_val   = max(1, int(len(dataset) * 0.1))
     n_train = len(dataset) - n_val
@@ -94,6 +107,7 @@ def train(args):
         train_set, batch_size=args.batch_size, shuffle=True,
         collate_fn=collate_fn, num_workers=0,
         pin_memory=(device.type == 'cuda'),
+        drop_last=True,  # DIFUSCO 官方: drop_last=True
     )
     val_loader = DataLoader(
         val_set, batch_size=args.batch_size, shuffle=False,
@@ -108,6 +122,8 @@ def train(args):
         hidden_dim=args.hidden_dim,
         encoder_type=args.encoder_type,
         T=args.T,
+        diffusion_schedule=args.diffusion_schedule,
+        inference_schedule=args.inference_schedule,
         inference_steps=args.inference_steps,
     ).to(device)
 
@@ -117,12 +133,16 @@ def train(args):
     n_params = sum(p.numel() for p in model.parameters())
     print(f'Params: {n_params:,}')
 
-    # 优化器和学习率调度
-    optimizer = torch.optim.Adam(
-        model.parameters(), lr=args.lr, weight_decay=args.weight_decay
+    # 优化器: AdamW (DIFUSCO 官方)
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=args.lr,
+        weight_decay=args.weight_decay,
     )
+
+    # 学习率调度: cosine-decay (DIFUSCO 官方)
     total_steps = args.epochs * len(train_loader)
-    scheduler = get_lr_scheduler(optimizer, args.warmup_steps, total_steps)
+    scheduler = get_cosine_decay_scheduler(optimizer, total_steps, args.warmup_steps)
 
     # 保存目录
     os.makedirs(args.save_dir, exist_ok=True)
@@ -136,7 +156,7 @@ def train(args):
         'lr': [],
     }
 
-    # ------ 续训：从 checkpoint 恢复 ------
+    # 续训
     if args.resume:
         ckpt_path = args.resume
         print(f'Resuming from {ckpt_path}')
@@ -147,14 +167,22 @@ def train(args):
         start_epoch = ckpt['epoch'] + 1
         best_val_loss = ckpt['val_loss']
         print(f'  Resumed from epoch {ckpt["epoch"]}, best_val_loss={best_val_loss:.6f}')
-        # 读取已有历史，追加而不是覆盖
         hist_path = os.path.join(args.save_dir, 'history.json')
         if os.path.exists(hist_path):
             history = json.load(open(hist_path))
 
     # --------------- 训练循环 ---------------
     global_step = (start_epoch - 1) * len(train_loader)
-    for epoch in range(start_epoch, start_epoch + args.epochs):
+    last_ckpt = None
+
+    # 续训时恢复 scheduler
+    if args.resume and 'scheduler_state' in ckpt:
+        scheduler.load_state_dict(ckpt['scheduler_state'])
+    elif args.resume and 'scheduler_state' not in ckpt:
+        for _ in range(global_step):
+            scheduler.step()
+
+    for epoch in range(start_epoch, args.epochs + 1):
         model.train()
         t0 = time.time()
         epoch_loss = 0.0
@@ -163,10 +191,8 @@ def train(args):
             coords = coords.to(device)
             adj_0  = adj_0.to(device)
 
-            # 三种 mode 的 compute_loss 接口完全相同
             loss = model.compute_loss(coords, adj_0)
 
-            # 安全保护：跳过异常 batch，避免权重污染
             if not torch.isfinite(loss):
                 global_step += 1
                 continue
@@ -181,10 +207,10 @@ def train(args):
             epoch_loss += loss.item()
             global_step += 1
 
-        avg_train_loss = epoch_loss / len(train_loader)
+        avg_train_loss = epoch_loss / max(1, len(train_loader))
         current_lr = optimizer.param_groups[0]['lr']
 
-        # 验证（同样用 compute_loss，三种 mode 接口相同）
+        # 验证
         model.eval()
         val_loss = 0.0
         with torch.no_grad():
@@ -192,7 +218,7 @@ def train(args):
                 coords = coords.to(device)
                 adj_0  = adj_0.to(device)
                 val_loss += model.compute_loss(coords, adj_0).item()
-        avg_val_loss = val_loss / len(val_loader)
+        avg_val_loss = val_loss / max(1, len(val_loader))
 
         elapsed = time.time() - t0
         print(
@@ -205,26 +231,33 @@ def train(args):
         history['val_loss'].append(avg_val_loss)
         history['lr'].append(current_lr)
 
-        # 保存最佳 checkpoint（使用 EMA 模型权重）
+        # 构建 checkpoint 数据 (每个 epoch 都构建，解决作用域问题)
+        ckpt_data = {
+            'epoch': epoch,
+            'mode': args.mode,
+            'encoder_type': args.encoder_type,
+            'model_state': model.state_dict(),
+            'ema_state': ema_model.state_dict(),
+            'optimizer_state': optimizer.state_dict(),
+            'scheduler_state': scheduler.state_dict(),
+            'val_loss': avg_val_loss,
+            'args': vars(args),
+        }
+        last_ckpt = ckpt_data
+
+        # 保存最佳
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
-            ckpt = {
-                'epoch': epoch,
-                'mode': args.mode,
-                'encoder_type': args.encoder_type,
-                'model_state': model.state_dict(),
-                'ema_state': ema_model.state_dict(),
-                'optimizer_state': optimizer.state_dict(),
-                'val_loss': avg_val_loss,
-                'args': vars(args),
-            }
-            torch.save(ckpt, os.path.join(args.save_dir, 'best.pt'))
+            torch.save(ckpt_data, os.path.join(args.save_dir, 'best.pt'))
 
-        # 每 10 epoch 额外存一次
+        # 每 10 epoch 保存 (使用当前 epoch 的 ckpt，不再有作用域问题)
         if epoch % 10 == 0:
-            torch.save(ckpt, os.path.join(args.save_dir, f'epoch{epoch:03d}.pt'))
+            torch.save(ckpt_data, os.path.join(args.save_dir, f'epoch{epoch:03d}.pt'))
 
-        # 每 epoch 覆盖一次历史（续训时追加到已有历史）
+        # 保存最后一个 (方便续训)
+        torch.save(ckpt_data, os.path.join(args.save_dir, 'last.pt'))
+
+        # 历史
         with open(os.path.join(args.save_dir, 'history.json'), 'w') as f:
             json.dump(history, f, indent=2)
 
@@ -242,36 +275,45 @@ def parse_args():
     # 核心参数
     p.add_argument('--mode', type=str, default='flow_matching',
                    choices=['flow_matching', 'discrete_ddpm', 'continuous_ddpm'],
-                   help='生成框架（三方对比实验的核心变量）')
+                   help='生成框架')
     p.add_argument('--data_file', type=str, default='data/tsp20_train.txt')
-    p.add_argument('--save_dir',  type=str, default=None,
-                   help='checkpoint 保存目录；默认自动命名为 checkpoints/<mode>_<encoder>')
+    p.add_argument('--save_dir',  type=str, default=None)
 
     # 模型结构
     p.add_argument('--encoder_type', type=str, default='gated_gcn',
                    choices=['gated_gcn', 'gat', 'gcn'])
-    p.add_argument('--n_layers',   type=int, default=12,
-                   help='GNN 层数，DIFUSCO 论文用 12')
-    p.add_argument('--hidden_dim', type=int, default=256,
-                   help='隐藏层维度，DIFUSCO 论文用 256')
-    p.add_argument('--T',          type=int, default=1000,
-                   help='扩散步数，仅 discrete_ddpm / continuous_ddpm 使用')
+    p.add_argument('--n_layers',   type=int, default=12)
+    p.add_argument('--hidden_dim', type=int, default=256)
+    p.add_argument('--T',          type=int, default=1000)
     p.add_argument('--inference_steps', type=int, default=None,
-                   help='推理步数；FM 默认 20，D3PM/DDPM 默认 50')
+                   help='推理步数; FM 默认 20, D3PM/DDPM 默认 50')
 
-    # 训练超参数
-    p.add_argument('--batch_size',   type=int,   default=64)
-    p.add_argument('--lr',           type=float, default=1e-4)
-    p.add_argument('--weight_decay', type=float, default=0.0)
+    # 扩散 schedule
+    p.add_argument('--diffusion_schedule', type=str, default='linear',
+                   choices=['linear', 'cosine'],
+                   help='Beta schedule (DIFUSCO 训练用 linear)')
+    p.add_argument('--inference_schedule', type=str, default='cosine',
+                   choices=['linear', 'cosine'],
+                   help='推理时间步分布 (DIFUSCO 默认 cosine)')
+
+    # 训练超参数 (对齐 DIFUSCO 官方)
+    p.add_argument('--batch_size',   type=int,   default=64,
+                   help='DIFUSCO: 64 (TSP50), 32 (TSP100)')
+    p.add_argument('--lr',           type=float, default=2e-4,
+                   help='DIFUSCO 官方: 0.0002')
+    p.add_argument('--weight_decay', type=float, default=1e-4,
+                   help='DIFUSCO 官方: 0.0001')
     p.add_argument('--epochs',       type=int,   default=50)
-    p.add_argument('--warmup_steps', type=int,   default=1000)
+    p.add_argument('--warmup_steps', type=int,   default=0,
+                   help='线性 warmup 步数 (DIFUSCO 无 warmup)')
     p.add_argument('--ema_decay',    type=float, default=0.999)
     p.add_argument('--resume', type=str, default=None,
-                   help='从指定 checkpoint 续训，例如 checkpoints/discrete_ddpm_gated_gcn/best.pt')
+                   help='从 checkpoint 续训')
+    p.add_argument('--seed', type=int, default=42,
+                   help='随机种子 (可复现)')
 
     args = p.parse_args()
 
-    # 自动生成 save_dir
     if args.save_dir is None:
         args.save_dir = f'checkpoints/{args.mode}_{args.encoder_type}'
 

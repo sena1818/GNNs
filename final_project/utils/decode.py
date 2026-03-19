@@ -1,6 +1,7 @@
 """
 TSP 解码器 — 从概率热力图解码出合法 Hamilton 回路
 
+
 三种解码策略（速度 vs 质量的 Pareto 权衡）:
 
   greedy_decode(heatmap, coords)
@@ -21,6 +22,7 @@ TSP 解码器 — 从概率热力图解码出合法 Hamilton 回路
     返回:    tour  list[int]，长度 N，0-indexed，合法 Hamilton 回路
 """
 
+import math
 import torch
 import numpy as np
 from typing import List
@@ -136,7 +138,7 @@ def beam_search_decode(
             for prob, idx in zip(probs.tolist(), indices.tolist()):
                 if prob <= 0:
                     continue
-                new_log_prob = log_prob + (prob + 1e-10)
+                new_log_prob = log_prob + math.log(prob + 1e-10)
                 new_beams.append((new_log_prob, path + [idx]))
 
         if not new_beams:
