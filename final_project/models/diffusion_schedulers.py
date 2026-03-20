@@ -191,6 +191,11 @@ class GaussianDiffusion:
     推理: DDIM 确定性采样
 
     支持 beta schedule: 'linear' 和 'cosine'
+
+    注意: alphabar / sqrt_alphabar / sqrt_one_minus_alphabar 同时提供
+          numpy 版本 (训练兼容) 和 torch 版本 (推理加速)。
+          调用 to(device) 将预计算 tensor 移至 GPU，消除推理循环中的
+          numpy↔torch 转换开销。
     """
 
     def __init__(self, T: int = 1000, schedule: str = 'linear'):
@@ -208,9 +213,21 @@ class GaussianDiffusion:
         self.alpha = np.concatenate((np.array([1.0]), 1 - self.beta))
         self.alphabar = np.cumprod(self.alpha)
 
+        # 预计算 torch tensor 版本 (推理时用，避免循环内 numpy 转换)
+        self.alphabar_torch = torch.from_numpy(self.alphabar).float()
+        self.sqrt_alphabar_torch = torch.sqrt(self.alphabar_torch)
+        self.sqrt_one_minus_alphabar_torch = torch.sqrt(1.0 - self.alphabar_torch)
+
     def _cos_noise(self, t):
         offset = 0.008
         return np.cos(math.pi * 0.5 * (t / self.T + offset) / (1 + offset)) ** 2
+
+    def to(self, device):
+        """将预计算的推理 tensor 移至指定设备 (在 model.to(device) 后调用)。"""
+        self.alphabar_torch = self.alphabar_torch.to(device)
+        self.sqrt_alphabar_torch = self.sqrt_alphabar_torch.to(device)
+        self.sqrt_one_minus_alphabar_torch = self.sqrt_one_minus_alphabar_torch.to(device)
+        return self
 
     def sample(self, x0: torch.Tensor, t: np.ndarray):
         """

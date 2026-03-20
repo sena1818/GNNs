@@ -10,7 +10,7 @@ set -e
 cd "$(dirname "$0")/.."
 
 CHECKPOINT="${1:-checkpoints/flow_matching_gated_gcn/best.pt}"
-DATA="data/tsp50_train.txt"
+DATA="data/tsp50_test.txt"
 RESULTS_DIR="experiments/results"
 mkdir -p "$RESULTS_DIR"
 

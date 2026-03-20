@@ -93,6 +93,14 @@ class TSPDiffusionModel(nn.Module):
         elif mode == 'continuous_ddpm':
             self.scheduler = GaussianDiffusion(T=T, schedule=diffusion_schedule)
 
+    def to(self, *args, **kwargs):
+        """Override to() 将非 nn.Module 的 scheduler tensor 也移至目标设备。"""
+        result = super().to(*args, **kwargs)
+        if hasattr(self.scheduler, 'to'):
+            device = next(self.parameters()).device
+            self.scheduler.to(device)
+        return result
+
     # =========================================================================
     # 公共接口
     # =========================================================================
@@ -228,14 +236,14 @@ class TSPDiffusionModel(nn.Module):
 
         for i in range(steps):
             t1, t2 = schedule(i)
-            t1_np = np.array([t1]).astype(int)
-            t2_np = np.array([t2]).astype(int)
+            t1_idx = int(t1)
+            t2_idx = int(t2)
 
             # GNN 输入
             xt_input = xt.float() * 2 - 1
             xt_input = xt_input * (1.0 + 0.05 * torch.rand_like(xt_input))
 
-            t_tensor = torch.from_numpy(t1_np).float().to(device)
+            t_tensor = torch.tensor([t1_idx], dtype=torch.float, device=device)
             x0_pred = self.encoder(coords.float(), xt_input.float(), t_tensor)
 
             # softmax → x0 概率分布
@@ -243,7 +251,7 @@ class TSPDiffusionModel(nn.Module):
             # (B, N, N, 2)
 
             # 后验采样
-            xt = self._categorical_posterior(t2_np, t1_np, x0_pred_prob, xt)
+            xt = self._categorical_posterior(t2_idx, t1_idx, x0_pred_prob, xt)
 
         # 最终热力图: 用最后一步的 softmax 概率
         heatmap = x0_pred_prob[..., 1]  # P(edge=1)
@@ -255,15 +263,17 @@ class TSPDiffusionModel(nn.Module):
         D3PM 后验采样 — 与 DIFUSCO pl_meta_model.py categorical_posterior 完全对齐。
 
         q(x_{t-1} | x_t, x_0_hat) 的精确 Bayes 公式。
+
+        Args:
+            target_t: int, 目标时间步索引
+            t:        int, 当前时间步索引
+            x0_pred_prob: (B, N, N, 2) softmax 概率
+            xt:       (B, N, N) 当前状态 {0, 1}
         """
         diffusion = self.scheduler
 
-        # 转为 int 以安全索引 numpy Q_bar
-        t_idx = int(t) if not isinstance(t, np.ndarray) else int(t.item())
-        if target_t is None:
-            tgt_idx = t_idx - 1
-        else:
-            tgt_idx = int(target_t) if not isinstance(target_t, np.ndarray) else int(target_t.item())
+        t_idx = int(t)
+        tgt_idx = int(target_t) if target_t is not None else t_idx - 1
 
         device = x0_pred_prob.device
 
@@ -331,6 +341,8 @@ class TSPDiffusionModel(nn.Module):
     def _gaussian_sample(self, coords: torch.Tensor, steps: int) -> torch.Tensor:
         """
         Gaussian DDPM 推理 — 与 DIFUSCO 对齐，支持 DDIM。
+
+        所有调度参数预存于 GPU tensor，循环内无 numpy 转换。
         """
         B, N, _ = coords.shape
         device = coords.device
@@ -342,18 +354,28 @@ class TSPDiffusionModel(nn.Module):
             T=self.T, inference_T=steps,
         )
 
+        # 获取预计算的 GPU tensor
+        diffusion = self.scheduler
+        sqrt_abar = diffusion.sqrt_alphabar_torch          # (T+1,) on device
+        sqrt_one_minus_abar = diffusion.sqrt_one_minus_alphabar_torch  # (T+1,)
+        abar = diffusion.alphabar_torch                     # (T+1,)
+
         for i in range(steps):
             t1, t2 = schedule(i)
-            t1_np = np.array([t1]).astype(int)
-            t2_np = np.array([t2]).astype(int)
+            t1_idx = int(t1)
+            t2_idx = int(t2)
 
-            t_tensor = torch.from_numpy(t1_np).float().to(device)
+            t_tensor = torch.tensor([t1_idx], dtype=torch.float, device=device)
 
             with torch.no_grad():
                 pred = self.encoder(coords.float(), xt.float(), t_tensor)
                 pred = pred.squeeze(1)  # (B, N, N)
 
-            xt = self._gaussian_posterior(t2_np, t1_np, pred, xt)
+            # DDIM 纯 tensor 后验 (无 numpy 转换)
+            xt = self._gaussian_posterior_tensor(
+                t2_idx, t1_idx, pred, xt,
+                abar, sqrt_abar, sqrt_one_minus_abar,
+            )
 
         # {-1, +1} → [0, 1]
         heatmap = xt.detach() * 0.5 + 0.5
@@ -361,26 +383,29 @@ class TSPDiffusionModel(nn.Module):
         heatmap = (heatmap + heatmap.transpose(-1, -2)) / 2.0
         return heatmap
 
-    def _gaussian_posterior(self, target_t, t, pred, xt):
+    @staticmethod
+    def _gaussian_posterior_tensor(
+        target_t_idx: int, t_idx: int,
+        pred: torch.Tensor, xt: torch.Tensor,
+        abar: torch.Tensor,
+        sqrt_abar: torch.Tensor,
+        sqrt_one_minus_abar: torch.Tensor,
+    ) -> torch.Tensor:
         """
-        Gaussian 后验 (DDIM) — 与 DIFUSCO pl_meta_model.py gaussian_posterior 对齐。
-        默认使用 DDIM 确定性采样。
+        DDIM 确定性后验 — 纯 tensor 运算，与 DIFUSCO 公式完全等价。
+
+        公式 (DDIM, σ=0):
+          x_{t-1} = √(ᾱ_{t-1}/ᾱ_t) · (x_t - √(1-ᾱ_t) · ε_θ)
+                  + √(1-ᾱ_{t-1}) · ε_θ
+
+        所有系数直接从预计算 tensor 中用 int 索引取标量，
+        无 numpy 转换，无 .item() 调用。
         """
-        diffusion = self.scheduler
+        coeff_xt = (sqrt_abar[target_t_idx] / sqrt_abar[t_idx])          # scalar tensor
+        coeff_eps_sub = sqrt_one_minus_abar[t_idx]                        # scalar tensor
+        coeff_eps_add = sqrt_one_minus_abar[target_t_idx]                 # scalar tensor
 
-        if target_t is None:
-            target_t = t - 1
-        else:
-            target_t = torch.from_numpy(target_t).view(1)
-
-        atbar = diffusion.alphabar[t]
-        atbar_target = diffusion.alphabar[target_t]
-
-        # DDIM 确定性采样
-        xt_target = np.sqrt(atbar_target / atbar).item() * (
-            xt - np.sqrt(1 - atbar).item() * pred
-        )
-        xt_target = xt_target + np.sqrt(1 - atbar_target).item() * pred
+        xt_target = coeff_xt * (xt - coeff_eps_sub * pred) + coeff_eps_add * pred
         return xt_target
 
     # =========================================================================
