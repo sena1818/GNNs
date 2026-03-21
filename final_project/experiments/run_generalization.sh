@@ -10,13 +10,17 @@
 set -e
 cd "$(dirname "$0")/.."
 
-CHECKPOINT="${1:-checkpoints/fm_gated_gcn/best.pt}"
+CHECKPOINT="${1:-checkpoints/flow_matching_gated_gcn/best.pt}"
 RESULTS_DIR="experiments/results"
 mkdir -p "$RESULTS_DIR"
+
+# 从 checkpoint 路径提取模型名（用于结果文件命名，避免多模型覆盖）
+MODEL_TAG=$(basename "$(dirname "$CHECKPOINT")")
 
 echo "============================================"
 echo " Cross-Scale Generalization Test"
 echo " Checkpoint: $CHECKPOINT"
+echo " Model Tag : $MODEL_TAG"
 echo "============================================"
 
 for scale in 20 50 100; do
@@ -35,19 +39,12 @@ for scale in 20 50 100; do
         continue
     fi
 
-    echo "--- TSP-$scale (greedy) ---"
+    echo "--- TSP-$scale (merge+2opt) ---"
     python evaluate.py \
         --checkpoint "$CHECKPOINT" \
         --data_file "$DATA" \
-        --decode greedy \
-        --save_result "$RESULTS_DIR/gen_tsp${scale}_greedy.json"
-
-    echo "--- TSP-$scale (greedy+2opt) ---"
-    python evaluate.py \
-        --checkpoint "$CHECKPOINT" \
-        --data_file "$DATA" \
-        --decode greedy --use_2opt \
-        --save_result "$RESULTS_DIR/gen_tsp${scale}_greedy2opt.json"
+        --decode merge --use_2opt \
+        --save_result "$RESULTS_DIR/gen_${MODEL_TAG}_tsp${scale}.json"
 done
 
 echo ""
