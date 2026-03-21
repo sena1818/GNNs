@@ -28,6 +28,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from models.tsp_dataset import TSPDataset, collate_fn
 from models.tsp_model import TSPDiffusionModel
 from utils.decode import batch_decode, tour_length, is_valid_tour
+from utils.tsp_utils import merge_tours
 
 
 def compute_gap(pred_tour, opt_tour, coords):
@@ -95,15 +96,27 @@ def evaluate(args):
 
         t_start = time.time()
         with torch.no_grad():
-            heatmaps = model.sample(coords, inference_steps=inference_steps)
+            heatmaps = model.sample(coords, inference_steps=inference_steps,
+                                    inference_trick=getattr(args, 'inference_trick', None))
         total_infer_time += time.time() - t_start
 
-        pred_tours = batch_decode(
-            heatmaps, coords,
-            method=args.decode,
-            beam_k=args.beam_k,
-            use_2opt=args.use_2opt,
-        )
+        if args.decode == 'merge':
+            pred_tours = []
+            for i in range(B):
+                h = heatmaps[i].cpu()
+                c = coords[i].cpu()
+                tour = merge_tours(h, c)
+                if args.use_2opt:
+                    from utils.decode import two_opt_improve
+                    tour = two_opt_improve(tour, c)
+                pred_tours.append(tour)
+        else:
+            pred_tours = batch_decode(
+                heatmaps, coords,
+                method=args.decode,
+                beam_k=args.beam_k,
+                use_2opt=args.use_2opt,
+            )
 
         for i in range(B):
             c    = coords[i].cpu()
@@ -178,10 +191,13 @@ def parse_args():
     p.add_argument('--batch_size', type=int, default=1,
                    help='DIFUSCO 官方 test batch_size=1')
     p.add_argument('--inference_steps', type=int, default=None)
-    p.add_argument('--decode',     type=str, default='greedy',
-                   choices=['greedy', 'beam_search'])
+    p.add_argument('--decode',     type=str, default='merge',
+                   choices=['greedy', 'beam_search', 'merge'])
     p.add_argument('--beam_k',     type=int, default=5)
     p.add_argument('--use_2opt',   action='store_true')
+    p.add_argument('--inference_trick', type=str, default=None,
+                   choices=[None, 'ddim'],
+                   help='Gaussian 推理模式: None=DDPM随机(默认), ddim=确定性')
     p.add_argument('--save_result', type=str, default=None)
     return p.parse_args()
 

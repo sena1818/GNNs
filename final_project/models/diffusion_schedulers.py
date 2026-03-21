@@ -218,6 +218,13 @@ class GaussianDiffusion:
         self.sqrt_alphabar_torch = torch.sqrt(self.alphabar_torch)
         self.sqrt_one_minus_alphabar_torch = torch.sqrt(1.0 - self.alphabar_torch)
 
+        # DDPM 随机后验额外需要的 tensor (与 DIFUSCO 官方对齐)
+        self.alpha_torch = torch.from_numpy(self.alpha).float()
+        # beta 前补 0 使索引对齐: beta_torch[t] 对应第 t 步
+        self.beta_torch = torch.from_numpy(
+            np.concatenate([[0.0], self.beta])
+        ).float()
+
     def _cos_noise(self, t):
         offset = 0.008
         return np.cos(math.pi * 0.5 * (t / self.T + offset) / (1 + offset)) ** 2
@@ -227,6 +234,8 @@ class GaussianDiffusion:
         self.alphabar_torch = self.alphabar_torch.to(device)
         self.sqrt_alphabar_torch = self.sqrt_alphabar_torch.to(device)
         self.sqrt_one_minus_alphabar_torch = self.sqrt_one_minus_alphabar_torch.to(device)
+        self.alpha_torch = self.alpha_torch.to(device)
+        self.beta_torch = self.beta_torch.to(device)
         return self
 
     def sample(self, x0: torch.Tensor, t: np.ndarray):

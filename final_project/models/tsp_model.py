@@ -127,10 +127,13 @@ class TSPDiffusionModel(nn.Module):
         self,
         coords: torch.Tensor,
         inference_steps: int = None,
+        inference_trick: str = None,
     ) -> torch.Tensor:
         """
         推理: 生成边概率热力图。
 
+        Args:
+            inference_trick: Gaussian 推理模式。None=DDPM 随机 (DIFUSCO 默认), 'ddim'=确定性。
         Returns:
             heatmap: (B, N, N) in [0, 1]
         """
@@ -140,7 +143,7 @@ class TSPDiffusionModel(nn.Module):
         elif self.mode == 'discrete_ddpm':
             return self._categorical_sample(coords, steps)
         elif self.mode == 'continuous_ddpm':
-            return self._gaussian_sample(coords, steps)
+            return self._gaussian_sample(coords, steps, inference_trick=inference_trick)
 
     # =========================================================================
     # Flow Matching [IMPROVEMENT: 本项目扩展]
@@ -354,9 +357,13 @@ class TSPDiffusionModel(nn.Module):
 
         return F.mse_loss(pred_eps, epsilon.float())
 
-    def _gaussian_sample(self, coords: torch.Tensor, steps: int) -> torch.Tensor:
+    def _gaussian_sample(self, coords: torch.Tensor, steps: int,
+                         inference_trick: str = None) -> torch.Tensor:
         """
-        Gaussian DDPM 推理 — 与 DIFUSCO 对齐，支持 DDIM。
+        Gaussian DDPM 推理 — 与 DIFUSCO 对齐。
+
+        Args:
+            inference_trick: None=DDPM 随机后验 (DIFUSCO 默认), 'ddim'=确定性采样。
 
         所有调度参数预存于 GPU tensor，循环内无 numpy 转换。
         """
@@ -389,11 +396,17 @@ class TSPDiffusionModel(nn.Module):
                 # 裁剪噪声预测，防止 DDIM 多步累积后 xt 爆炸
                 pred = pred.clamp(-10.0, 10.0)
 
-            # DDIM 纯 tensor 后验 (无 numpy 转换)
-            xt = self._gaussian_posterior_tensor(
-                t2_idx, t1_idx, pred, xt,
-                abar, sqrt_abar, sqrt_one_minus_abar,
-            )
+            # 后验采样: DDPM 随机 (默认, 匹配 DIFUSCO) 或 DDIM 确定性
+            if inference_trick == 'ddim':
+                xt = self._gaussian_posterior_tensor(
+                    t2_idx, t1_idx, pred, xt,
+                    abar, sqrt_abar, sqrt_one_minus_abar,
+                )
+            else:
+                xt = self._gaussian_posterior_ddpm_tensor(
+                    t2_idx, t1_idx, pred, xt,
+                    diffusion.alpha_torch, abar, diffusion.beta_torch,
+                )
 
         # {-1, +1} → [0, 1]
         heatmap = xt.detach() * 0.5 + 0.5
@@ -425,6 +438,38 @@ class TSPDiffusionModel(nn.Module):
 
         xt_target = coeff_xt * (xt - coeff_eps_sub * pred) + coeff_eps_add * pred
         return xt_target
+
+    @staticmethod
+    def _gaussian_posterior_ddpm_tensor(
+        target_t_idx: int, t_idx: int,
+        pred: torch.Tensor, xt: torch.Tensor,
+        alpha: torch.Tensor,
+        abar: torch.Tensor,
+        beta: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        DDPM 随机后验 — 与 DIFUSCO 官方默认推理完全一致。
+
+        公式 (DDPM, 随机采样):
+          β̃_t = β_t · (1 - ᾱ_{t-1}) / (1 - ᾱ_t)
+          μ = (1/√α_t) · (x_t - (1-α_t)/√(1-ᾱ_t) · ε_θ)
+          x_{t-1} = μ + √β̃_t · z,    z ~ N(0, I)  (最后一步 z=0)
+
+        与 DDIM 的区别: 注入随机噪声 z，防止 pred 累积爆炸。
+        """
+        at = alpha[t_idx]
+        atbar = abar[t_idx]
+        atbar_prev = abar[target_t_idx]
+        beta_tilde = beta[t_idx] * (1.0 - atbar_prev) / (1.0 - atbar + 1e-8)
+
+        mean = (1.0 / torch.sqrt(at)) * (
+            xt - (1.0 - at) / torch.sqrt(1.0 - atbar + 1e-8) * pred
+        )
+
+        if target_t_idx > 0:
+            z = torch.randn_like(xt)
+            return mean + torch.sqrt(beta_tilde) * z
+        return mean
 
     # =========================================================================
     # 可视化辅助 (FM 专用)
