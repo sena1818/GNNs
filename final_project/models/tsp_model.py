@@ -386,6 +386,8 @@ class TSPDiffusionModel(nn.Module):
             with torch.no_grad():
                 pred = self.encoder(coords.float(), xt.float(), t_tensor)
                 pred = pred.squeeze(1)  # (B, N, N)
+                # 裁剪噪声预测，防止 DDIM 多步累积后 xt 爆炸
+                pred = pred.clamp(-10.0, 10.0)
 
             # DDIM 纯 tensor 后验 (无 numpy 转换)
             xt = self._gaussian_posterior_tensor(

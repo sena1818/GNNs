@@ -84,6 +84,13 @@ def greedy_decode(heatmap: torch.Tensor, coords: torch.Tensor) -> List[int]:
             row[v] = 0.0
 
         next_node = row.argmax().item()
+        # 兜底：如果 argmax 选到了已访问节点（热力图全零时会发生），
+        # 退化为选第一个未访问节点，保证 tour 合法
+        if visited[next_node]:
+            for fallback in range(N):
+                if not visited[fallback]:
+                    next_node = fallback
+                    break
         tour.append(next_node)
         visited[next_node] = True
 
