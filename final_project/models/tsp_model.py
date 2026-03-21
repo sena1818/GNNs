@@ -147,21 +147,35 @@ class TSPDiffusionModel(nn.Module):
     # =========================================================================
 
     def _fm_loss(self, coords: torch.Tensor, adj_0: torch.Tensor) -> torch.Tensor:
-        """FM loss: MSE on velocity field."""
+        """
+        FM loss: MSE on velocity field。
+
+        使用 {-1,+1} 缩放 (与 Gaussian DDPM 一致):
+          - 非边 adj_scaled=-1, 边 adj_scaled=+1
+          - 速度场: 非边 v*~N(+1,1), 边 v*~N(-1,1), 分布中心相差 2
+          - 比原始 {0,1} 缩放 (非边/边速度场中心相差 1) 更容易学习
+        对应推理时: heatmap = x * 0.5 + 0.5
+        """
         B = adj_0.shape[0]
         t = torch.rand(B, device=adj_0.device)
         epsilon = torch.randn_like(adj_0)
 
-        adj_t = self.scheduler.interpolate(adj_0, epsilon, t)
+        # 缩放到 {-1, +1}，与 DDPM 对齐，速度场更易区分
+        adj_scaled = adj_0 * 2.0 - 1.0
+
+        adj_t = self.scheduler.interpolate(adj_scaled, epsilon, t)
 
         # GNN 输出 (B, 1, N, N)，squeeze 到 (B, N, N)
         pred_v = self.encoder(coords, adj_t, t).squeeze(1)
 
-        v_target = self.scheduler.get_velocity_target(adj_0, epsilon)
+        v_target = self.scheduler.get_velocity_target(adj_scaled, epsilon)
         return F.mse_loss(pred_v, v_target)
 
     def _fm_sample(self, coords: torch.Tensor, steps: int) -> torch.Tensor:
-        """FM 推理: Euler ODE 从 t=1 积分到 t=0。"""
+        """
+        FM 推理: Euler ODE 从 t=1 积分到 t=0。
+        训练用 {-1,+1} 缩放，推理结束后用 x*0.5+0.5 还原到 [0,1]。
+        """
         B, N, _ = coords.shape
         device = coords.device
 
@@ -172,9 +186,9 @@ class TSPDiffusionModel(nn.Module):
             v = self.encoder(coords, x, t_tensor).squeeze(1)
             x = x - dt * v
 
-        # FM 训练目标 x0=adj_0∈{0,1}，积分后 x≈{0,1}，直接 clamp 保留对比度
-        # sigmoid(0)=0.5, sigmoid(1)=0.73，对比度仅 0.23，远不如 clamp 的 [0,1]
-        heatmap = x.clamp(0, 1)
+        # {-1,+1} → [0,1]，与 DDPM 还原方式相同
+        heatmap = x * 0.5 + 0.5
+        heatmap = heatmap.clamp(0, 1)
         heatmap = (heatmap + heatmap.transpose(-1, -2)) / 2.0
         return heatmap
 
