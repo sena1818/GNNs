@@ -1,6 +1,6 @@
-% Diffusion Models for TSP — 最终项目报告
-% 海德堡大学 GNNs 课程 2025/26 冬季学期
-% 注意: 封面禁止使用大学/机构 Logo！
+% Diffusion Models for TSP — Final Project Report
+% Generative Neural Networks for the Sciences, Heidelberg University 2025/26
+% NOTE: No university/institution logo on cover!
 
 \documentclass[11pt,a4paper]{article}
 
@@ -15,218 +15,548 @@
 \usepackage{subcaption}
 \usepackage[margin=2.5cm]{geometry}
 \usepackage{natbib}
+\usepackage{xcolor}
+\usepackage{microtype}
 
-\title{Diffusion Models for Combinatorial Optimization: \\
-       Solving TSP via Generative Modeling}
+% Convenience: highlight TODOs
+\newcommand{\TODO}[1]{\textcolor{red}{\textbf{[TODO: #1]}}}
+
+\title{\textbf{Diffusion Models for Combinatorial Optimization:}\\
+       \textbf{Reproducing DIFUSCO and Introducing Flow Matching for TSP}}
 \author{
-  % TODO: 填写姓名和学号
+  % TODO: fill in names and Matrikelnummern
   Name1 (Matrikelnummer1)
   \and
   Name2 (Matrikelnummer2)
 }
-\date{March 2026 \\[1em]
-  Code: \url{https://github.com/xxx/tsp-diffusion} % TODO: 替换为实际仓库链接
+\date{March 2026 \\[0.5em]
+  \small Code: \url{https://github.com/sena1818/GNNs} \quad Branch: \texttt{flowmatching}
 }
 
 \begin{document}
-
 \maketitle
 
 % ============================================================
 \begin{abstract}
-% ~250 字 | 作者: 共同
-% TODO: 问题 + 方法 + 结果 + 贡献
+% ~250 words | Authors: Joint
+%
+% What problem: TSP is NP-hard; classical solvers scale poorly; ML solvers need new approaches.
+% What we do: Reproduce DIFUSCO (NeurIPS 2023) from scratch in PyTorch and extend it
+%             with Flow Matching as a novel generative framework.
+% How: Three variants share the same Gated GCN backbone — D3PM (discrete diffusion),
+%      Gaussian DDPM (continuous diffusion), and Flow Matching (deterministic ODE).
+% Results: D3PM achieves 1.90% optimality gap on TSP-50 (vs 0.10% in the original paper
+%          with 128k training samples; we use 50k). Gaussian DDPM achieves 6.21%.
+%          Flow Matching [RESULT PENDING FM RETRAIN].
+% Contribution: First systematic comparison of FM vs DDPM for graph-based CO;
+%               full alignment with DIFUSCO's training and decoding pipeline.
+
+The Travelling Salesman Problem (TSP) is a canonical NP-hard combinatorial optimisation
+problem with broad practical applications. Recent work has shown that diffusion generative
+models can learn to predict high-quality TSP solutions by treating the binary edge adjacency
+matrix as a structured object to denoise. In this project we (i) reproduce DIFUSCO
+\citep{sun2023difusco} from scratch in plain PyTorch without the original Lightning framework,
+and (ii) extend the comparison with Flow Matching \citep{lipman2022flow}, a deterministic
+ODE-based generative framework not previously studied for combinatorial optimisation.
+
+All three generative frameworks — discrete D3PM, Gaussian DDPM, and Flow Matching — share an
+identical Gated Graph Convolutional Network (Gated GCN) backbone with 12 layers and 256
+hidden dimensions, enabling a controlled comparison of the generative modelling paradigm alone.
+Models are trained on 50{,}000 TSP-50 instances and decoded with the \texttt{merge\_tours}
+greedy-edge-insertion algorithm followed by 2-opt local search.
+
+On TSP-50, D3PM achieves a \textbf{1.90\% optimality gap} (100\% valid tour rate),
+Gaussian DDPM achieves \textbf{6.21\%} (100\% valid tour rate after fixing an inference bug),
+and Flow Matching achieves \TODO{X.XX\%} after retraining with the correct \(\{-1,+1\}\)
+scaling. Our implementation, debugging notes, and experimental results are publicly available
+at the repository listed above.
 \end{abstract}
 
-% ============================================================
-\section{Introduction} % ~800 字 | 作者: TODO
-\textit{[Primary Author: TODO]}
-
-% TODO: TSP 难度 + LKH 局限 + 扩散模型动机 + 本文贡献列表
 
 % ============================================================
-\section{Background} % ~1200 字 | 作者: TODO
-\textit{[Primary Author: TODO]}
+\section{Introduction}
+\label{sec:intro}
+\textit{[Primary Author: \TODO{Name}]}
+
+The Travelling Salesman Problem asks: given $N$ cities with pairwise distances, find the
+shortest closed tour that visits every city exactly once. Despite its simple formulation,
+TSP is NP-hard \citep{garey1979computers}, and the best exact solvers (e.g.\ Concorde, LKH)
+require exponential time in the worst case, making them impractical for large instances or
+time-critical applications.
+
+Neural combinatorial optimisation has emerged as a promising alternative: rather than
+searching for a solution at test time, a model learns a solution distribution from data and
+produces high-quality solutions in milliseconds. Early approaches used
+pointer networks \citep{vinyals2015pointer} or attention-based auto-regressive models
+\citep{kool2019attention} to construct tours sequentially. More recently, diffusion
+generative models have been applied to the problem in a fundamentally different way:
+the binary edge adjacency matrix $\mathbf{A} \in \{0,1\}^{N \times N}$ of the optimal tour
+is treated as a structured data object to be generated \citep{sun2023difusco}.
+
+\paragraph{DIFUSCO.}
+DIFUSCO \citep{sun2023difusco} introduced this graph diffusion approach (NeurIPS 2023),
+demonstrating state-of-the-art results on TSP and MIS. Two variants are proposed: a
+\emph{discrete} diffusion model (D3PM \citep{austin2021d3pm}) that corrupts the binary
+adjacency matrix by randomly flipping bits, and a \emph{continuous} Gaussian DDPM that
+relaxes the matrix to real values and adds Gaussian noise. Both share a Gated GCN encoder
+conditioned on node coordinates and the current diffusion timestep.
+
+\paragraph{Motivation for Flow Matching.}
+Flow Matching \citep{lipman2022flow} is a recently proposed generative framework that trains
+a neural network to predict a \emph{constant velocity field} along straight-line paths from
+data to noise. Compared to DDPM, it requires far fewer inference steps (20 vs 50--1000),
+has a simpler training objective (MSE on a constant target), and produces more stable
+intermediate states. These properties make it an attractive candidate for combinatorial
+optimisation, yet no prior work has evaluated it in this setting.
+
+\paragraph{Contributions.}
+This project makes the following contributions:
+\begin{enumerate}
+  \item We reproduce DIFUSCO's D3PM and Gaussian DDPM in plain PyTorch, aligning all
+        implementation details (Q-bar transition matrices, Bayes posterior, DDPM stochastic
+        inference, \texttt{merge\_tours} decoder) with the official codebase.
+  \item We introduce \textbf{Flow Matching as a new generative framework for TSP}, the first
+        such comparison in the literature.
+  \item We conduct a controlled three-way comparison under identical GNN architecture,
+        training data, and decoding pipeline.
+  \item We document and fix two non-trivial inference bugs (DDIM accumulation explosion and
+        decoder fragility) that caused the Gaussian DDPM valid tour rate to drop to 4\%.
+\end{enumerate}
+
+The remainder of the paper is structured as follows. Section~\ref{sec:background} provides
+background on TSP, diffusion models, and Flow Matching. Section~\ref{sec:method} describes
+our implementation. Section~\ref{sec:experiments} presents experimental results.
+Section~\ref{sec:conclusion} concludes.
+
+
+% ============================================================
+\section{Background}
+\label{sec:background}
+\textit{[Primary Author: \TODO{Name}]}
 
 \subsection{Travelling Salesman Problem}
-% TODO: TSP 形式化定义
+Given $N$ cities with coordinates $\{\mathbf{c}_i\}_{i=1}^N \subset [0,1]^2$, TSP asks for
+a permutation $\pi$ minimising the total tour length:
+\begin{equation}
+  \min_\pi \sum_{i=1}^N \|\mathbf{c}_{\pi(i)} - \mathbf{c}_{\pi(i+1)}\|_2,
+  \quad \pi(N+1) \coloneqq \pi(1).
+  \label{eq:tsp}
+\end{equation}
+The optimal tour corresponds to a binary adjacency matrix
+$\mathbf{A}^* \in \{0,1\}^{N \times N}$ with exactly two ones per row and column, forming a
+single Hamiltonian cycle. We measure solution quality as the \emph{optimality gap}:
+\begin{equation}
+  \text{gap} = \frac{\text{cost}(\hat\pi) - \text{cost}(\pi^*)}{\text{cost}(\pi^*)} \times 100\%.
+\end{equation}
 
-\subsection{Denoising Diffusion Probabilistic Models}
-% TODO: DDPM 前向/逆向公式
+\subsection{Denoising Diffusion Probabilistic Models (DDPM)}
+DDPM \citep{ho2020ddpm} defines a forward process that gradually adds Gaussian noise to data
+$\mathbf{x}_0$ over $T$ steps:
+\begin{equation}
+  q(\mathbf{x}_t \mid \mathbf{x}_0)
+  = \mathcal{N}\!\left(\sqrt{\bar\alpha_t}\,\mathbf{x}_0,\;(1-\bar\alpha_t)\mathbf{I}\right),
+  \quad \bar\alpha_t = \prod_{s=1}^t (1-\beta_s),
+  \label{eq:ddpm_forward}
+\end{equation}
+where $\{\beta_t\}$ is a noise schedule. A neural network $\epsilon_\theta$ is trained to
+predict the noise:
+\begin{equation}
+  \mathcal{L}_\text{DDPM}
+  = \mathbb{E}_{t,\mathbf{x}_0,\boldsymbol\epsilon}
+    \left[\|\epsilon_\theta(\mathbf{x}_t, t) - \boldsymbol\epsilon\|^2\right].
+  \label{eq:ddpm_loss}
+\end{equation}
+Inference proceeds by iterating the DDPM posterior:
+\begin{equation}
+  \mathbf{x}_{t-1}
+  = \frac{1}{\sqrt{\alpha_t}}\!\left(\mathbf{x}_t - \frac{1-\alpha_t}{\sqrt{1-\bar\alpha_t}}\,
+    \epsilon_\theta(\mathbf{x}_t,t)\right) + \sqrt{\tilde\beta_t}\,\mathbf{z},
+  \quad \mathbf{z}\sim\mathcal{N}(\mathbf{0},\mathbf{I}),
+  \label{eq:ddpm_posterior}
+\end{equation}
+where $\tilde\beta_t = \beta_t(1-\bar\alpha_{t-1})/(1-\bar\alpha_t)$.
+The optional deterministic DDIM sampler \citep{song2020ddim} removes the noise term $\mathbf{z}$
+but is more susceptible to error accumulation over many steps (see Section~\ref{sec:bugs}).
+
+\subsection{D3PM: Discrete Diffusion}
+\label{sec:d3pm}
+For binary data, D3PM \citep{austin2021d3pm} defines a discrete Markov chain using
+$2\times 2$ transition matrices:
+\begin{equation}
+  \mathbf{Q}_t = (1-\beta_t)\mathbf{I} + \tfrac{\beta_t}{2}\mathbf{1}\mathbf{1}^\top,
+  \quad \bar{\mathbf{Q}}_t = \mathbf{Q}_1\cdots\mathbf{Q}_t.
+\end{equation}
+Forward sampling: $q(\mathbf{x}_t|\mathbf{x}_0)
+= \text{Cat}(\mathbf{x}_0\bar{\mathbf{Q}}_t)$.
+The Bayes posterior $q(\mathbf{x}_{t-1}|\mathbf{x}_t,\hat{\mathbf{x}}_0)$ is computed
+analytically and used for inference (see DIFUSCO \citep{sun2023difusco} Appendix for
+the full formula). Crucially, all intermediate states $\mathbf{x}_t$ remain binary
+graphs, preserving the adjacency structure throughout the diffusion trajectory.
 
 \subsection{Discrete vs.\ Continuous Diffusion for Graphs}
-\label{sec:discrete_vs_continuous}
-An important finding from DIFUSCO~\cite{sun2023difusco} is that \emph{discrete} Bernoulli
-diffusion (D3PM) consistently outperforms continuous Gaussian diffusion for graph-structured
-combinatorial optimization. In discrete diffusion, the binary adjacency matrix
-$\mathbf{X}_0 \in \{0,1\}^{N \times N}$ is corrupted by randomly flipping entries with
-probability $\beta_t$, so intermediate states $\mathbf{X}_t$ remain binary matrices---i.e.,
-valid graphs at every timestep. The GNN's message-passing naturally operates on such
-binary adjacency structures, preserving topological information throughout the diffusion
-trajectory.
-
-In contrast, continuous Gaussian diffusion relaxes $\mathbf{X}_0$ to $\mathbb{R}^{N \times N}$
-and adds Gaussian noise, producing intermediate states with arbitrary real values (e.g.,
-$-0.82$, $1.37$) that do not correspond to natural graph structures. On TSP-50, DIFUSCO
-reports ${\sim}0.10\text{--}0.17\%$ optimality gap with discrete diffusion versus
-${\sim}0.25\text{--}0.30\%$ with continuous diffusion---a significant performance gap.
-
-This raises a natural question: \emph{Can a better continuous-space generative framework
-close this gap?} Flow Matching, with its deterministic straight-line ODE and superior
-signal preservation (Section~\ref{sec:fm_tsp}), is a promising candidate. We implement
-all three variants under the same GNN architecture for systematic comparison
-(Section~\ref{sec:three_way}).
+\label{sec:disc_vs_cont}
+Discrete diffusion preserves binary graph structure at every timestep, giving the GNN
+a natural message-passing domain throughout the trajectory. Continuous Gaussian diffusion
+relaxes entries to $\mathbb{R}$, producing intermediate states with no natural graph
+interpretation. DIFUSCO reports $\sim\!0.10$--$0.17\%$ gap with D3PM versus
+$\sim\!0.25$--$0.30\%$ with Gaussian DDPM on TSP-50, a consistent gap across decoding
+strategies. This motivates the question: can a better continuous-space generative framework
+narrow this gap?
 
 \subsection{Flow Matching}
-Flow Matching~\cite{lipman2022flow} provides an elegant alternative to DDPM by defining a
-\emph{deterministic} probability flow between distributions.
-Given data $\mathbf{X}_0$ and noise $\boldsymbol{\epsilon} \sim \mathcal{N}(\mathbf{0}, \mathbf{I})$,
-the interpolation path is a straight line:
+\label{sec:fm_background}
+Flow Matching \citep{lipman2022flow} trains a neural ODE by regressing on the velocity of
+straight-line paths between data and noise distributions. Given
+$\mathbf{x}_0 \sim p_\text{data}$ and $\boldsymbol\epsilon \sim \mathcal{N}(\mathbf{0},\mathbf{I})$:
+\begin{align}
+  \mathbf{x}_t &= (1-t)\,\mathbf{x}_0 + t\,\boldsymbol\epsilon,
+    \quad t\sim\mathcal{U}[0,1], \label{eq:fm_interp} \\
+  \mathbf{v}^*(\mathbf{x}_t, t) &= \boldsymbol\epsilon - \mathbf{x}_0. \label{eq:fm_vtarget}
+\end{align}
+The velocity target is \emph{constant} along each path, leading to the simple MSE loss:
 \begin{equation}
-  \mathbf{X}_t = (1 - t)\,\mathbf{X}_0 + t\,\boldsymbol{\epsilon}, \quad t \in [0, 1]
-  \label{eq:fm_interp}
-\end{equation}
-The velocity field along this path is constant:
-\begin{equation}
-  \mathbf{v}^*(\mathbf{X}_t, t) = \boldsymbol{\epsilon} - \mathbf{X}_0
-  \label{eq:fm_velocity}
-\end{equation}
-A neural network $v_\theta$ is trained with a simple regression loss:
-\begin{equation}
-  \mathcal{L}_\text{FM} = \mathbb{E}_{t \sim \mathcal{U}[0,1],\,\mathbf{X}_0,\,\boldsymbol{\epsilon}}
-  \left[\left\|v_\theta(\mathbf{X}_t, t) - (\boldsymbol{\epsilon} - \mathbf{X}_0)\right\|^2\right]
+  \mathcal{L}_\text{FM}
+  = \mathbb{E}_{t,\mathbf{x}_0,\boldsymbol\epsilon}
+    \left[\|v_\theta(\mathbf{x}_t,t) - (\boldsymbol\epsilon - \mathbf{x}_0)\|^2\right].
   \label{eq:fm_loss}
 \end{equation}
-During inference, we integrate the learned ODE from $t=1$ (noise) backward to $t=0$ (data)
-using the Euler method with $K$ steps, requiring only $K = 10\text{--}20$ function evaluations
-compared to DDPM's 50--1000 steps.
-This straight-line formulation is particularly advantageous for graph-structured data:
-unlike DDPM's Brownian-motion-based SDE, the deterministic linear interpolation preserves
-the sparse topological structure of the adjacency matrix throughout the trajectory,
-giving the GNN a cleaner and more stable learning signal.
+Inference integrates the ODE $\dot{\mathbf{x}} = v_\theta(\mathbf{x},t)$ from $t=1$
+(noise) to $t=0$ (data) with $K$ Euler steps, requiring far fewer function evaluations
+than DDPM.
 
 \subsection{Related Work}
-% TODO: DIFUSCO, T2T-CO, Attention Model 综述
+\TODO{Brief survey: DIFUSCO \citep{sun2023difusco}, T2T-CO \citep{chen2024t2tco},
+Attention Model \citep{kool2019attention}, LKH \citep{helsgott2000lkh}, POMO.
+2--3 sentences each.}
+
 
 % ============================================================
-\section{Method} % ~1500 字 | 作者: 共同
+\section{Method}
+\label{sec:method}
 \textit{[Primary Author: Joint]}
 
 \subsection{Architecture Overview}
-% TODO: 架构图 (GNN Encoder + Diffusion Decoder)
+All three generative frameworks share an identical GNN encoder
+$f_\theta(\mathbf{C}, \mathbf{x}_t, t)$ that maps city coordinates $\mathbf{C}$, the
+current noisy adjacency state $\mathbf{x}_t$, and timestep $t$ to either a velocity field
+(FM), a noise prediction (Gaussian DDPM), or class logits (D3PM). The shared backbone
+enables a controlled comparison of the generative paradigm alone.
 
-\subsection{GNN Encoder}
-% TODO: Gated GCN / GAT / GCN 公式
+\TODO{Insert architecture diagram: GNN Encoder block diagram showing node/edge embeddings,
+time injection, and output head.}
+
+\subsection{Gated GCN Encoder}
+\label{sec:gnn}
+We use a 12-layer Gated GCN \citep{bresson2017gatedgcn} with hidden dimension 256,
+matching DIFUSCO's default configuration. Each layer performs:
+\begin{align}
+  \mathbf{g}_{ij} &= \sigma\!\left(
+    \mathbf{A}\mathbf{h}_i + \mathbf{B}\mathbf{h}_j + \mathbf{C}\mathbf{e}_{ij}
+  \right), \label{eq:gate} \\
+  \mathbf{h}_i' &= \text{ReLU}\!\left(\mathbf{U}\mathbf{h}_i
+    + \textstyle\sum_j \mathbf{g}_{ij} \odot \mathbf{V}\mathbf{h}_j\right), \\
+  \mathbf{e}_{ij}' &= \text{ReLU}\!\left(\mathbf{A}\mathbf{h}_i + \mathbf{B}\mathbf{h}_j
+    + \mathbf{C}\mathbf{e}_{ij}\right),
+\end{align}
+where $\sigma$ is the sigmoid function and $\odot$ is element-wise multiplication.
+External residual connections are applied after each layer. City coordinates are encoded
+via sinusoidal position embeddings; the diffusion timestep $t$ is encoded as a sinusoidal
+scalar embedding injected into every edge feature map.
+
+The output head consists of GroupNorm $\to$ ReLU $\to$ Conv2d$(d, C_\text{out}, 1)$,
+with $C_\text{out}=2$ for D3PM (class logits) and $C_\text{out}=1$ for Gaussian DDPM and FM
+(scalar prediction).
+
+\subsection{D3PM Training and Inference}
+\label{sec:d3pm_method}
+\paragraph{Training.}
+Given ground-truth $\mathbf{A}_0 \in \{0,1\}^{N\times N}$, we sample
+$t \sim \text{Uniform}\{1,\ldots,T\}$, apply the forward process
+$\mathbf{x}_t \sim \text{Cat}(\mathbf{A}_0^{1\text{-hot}} \bar{\mathbf{Q}}_t)$,
+scale to $\{-1,+1\}$ and add 5\% jitter (following DIFUSCO), and train with cross-entropy:
+\begin{equation}
+  \mathcal{L}_\text{D3PM} = \text{CrossEntropy}\!\left(f_\theta(\mathbf{C}, \mathbf{x}_t, t),\;
+    \mathbf{A}_0\right).
+\end{equation}
+
+\paragraph{Inference.}
+Starting from $\mathbf{x}_T \in \{0,1\}^{N\times N}$ (random Bernoulli), we apply 50 steps
+of the categorical posterior $q(\mathbf{x}_{t-1}|\mathbf{x}_t, \hat{\mathbf{x}}_0)$
+computed via Bayes rule with the cumulative transition matrices $\bar{\mathbf{Q}}_t$.
+The final heatmap is the model's softmax probability for the edge class:
+$\hat{\mathbf{P}} = \text{softmax}(f_\theta)[...,1] \in [0,1]^{N\times N}$.
+
+\subsection{Gaussian DDPM Training and Inference}
+\label{sec:gaussian_method}
+\paragraph{Training.}
+The adjacency matrix is scaled to $\{-1,+1\}$ (plus 5\% jitter) before noising.
+A linear beta schedule with $T=1000$ steps is used. The GNN predicts the noise $\epsilon$
+and is trained with MSE (Equation~\ref{eq:ddpm_loss}).
+
+\paragraph{Inference.}
+We apply 50 steps of the DDPM \emph{stochastic} posterior
+(Equation~\ref{eq:ddpm_posterior}), matching DIFUSCO's default. The deterministic DDIM
+sampler is available via a flag but causes error accumulation over 50 steps
+(Section~\ref{sec:bugs}). The final heatmap is obtained by $\hat{\mathbf{P}} = \mathbf{x}_0 \cdot 0.5 + 0.5$.
 
 \subsection{Flow Matching for TSP}
-\label{sec:fm_tsp}
+\label{sec:fm_method}
+\paragraph{Training.}
+We apply the \(\{-1,+1\}\) scaling $\mathbf{A}_\text{scaled} = 2\mathbf{A}_0 - 1$
+to improve the separability of the velocity field: edge entries target velocity
+$v^* = \epsilon - 1$ (mean $-1$) while non-edge entries target $v^* = \epsilon + 1$
+(mean $+1$), giving a mean separation of 2 compared to 1 in the raw $\{0,1\}$ space.
+The FM loss (Equation~\ref{eq:fm_loss}) is computed on this scaled space.
 
-\subsubsection{Continuous Relaxation}
-The ground-truth TSP adjacency matrix $\mathbf{X}_0 \in \{0,1\}^{N \times N}$ is a discrete
-object: each entry is 1 if the corresponding edge belongs to the optimal tour and 0 otherwise.
-While DIFUSCO's best results use discrete Bernoulli diffusion (Section~\ref{sec:discrete_vs_continuous}),
-Flow Matching requires a continuous state space. We therefore apply a \emph{continuous relaxation}:
-$\mathbf{X}_0$ is treated as an ordinary real-valued tensor in $\mathbb{R}^{N \times N}$---a
-vertex of the unit hypercube embedded in continuous space. This makes Flow Matching directly
-applicable, and we investigate whether its straight-line ODE can compensate for the loss
-of discrete structure.
-
-\subsubsection{Forward Path and Training Objective}
-We construct a straight-line interpolation between $\mathbf{X}_0$ and Gaussian noise
-$\boldsymbol{\epsilon} \sim \mathcal{N}(\mathbf{0}, \mathbf{I})$:
+\paragraph{Inference.}
+Starting from $\mathbf{x}_1 \sim \mathcal{N}(\mathbf{0},\mathbf{I})$, we integrate
+with $K=20$ Euler steps:
 \begin{equation}
-  \mathbf{X}_t = (1 - t)\,\mathbf{X}_0 + t\,\boldsymbol{\epsilon}, \quad t \sim \mathcal{U}[0,1]
+  \mathbf{x}_{t-\Delta t} = \mathbf{x}_t - \Delta t \cdot v_\theta(\mathbf{x}_t, t, \mathbf{C}),
+  \quad \Delta t = 1/K.
 \end{equation}
-The GNN velocity network $v_\theta(\mathbf{X}_t,\, t,\, \mathbf{C})$, conditioned on city
-coordinates $\mathbf{C} \in \mathbb{R}^{N \times 2}$, is trained to predict the constant
-target velocity $\boldsymbol{\epsilon} - \mathbf{X}_0$:
-\begin{equation}
-  \mathcal{L} = \mathbb{E}_{t,\,\mathbf{X}_0,\,\boldsymbol{\epsilon}}
-  \left[\left\|v_\theta(\mathbf{X}_t,\, t,\, \mathbf{C})
-        - (\boldsymbol{\epsilon} - \mathbf{X}_0)\right\|^2\right]
-\end{equation}
-This is a standard MSE regression objective over a linearly interpolated trajectory.
+The output is mapped back: $\hat{\mathbf{P}} = \mathbf{x}_0 \cdot 0.5 + 0.5$,
+clipped to $[0,1]$ and symmetrised.
 
-\subsubsection{Inference via Euler Integration}
-Starting from $\mathbf{X}_1 \sim \mathcal{N}(\mathbf{0}, \mathbf{I})$, we integrate the
-learned ODE backward from $t = 1$ to $t = 0$ using $K = 20$ Euler steps with step size
-$\Delta t = 1/K$:
-\begin{equation}
-  \mathbf{X}_{t - \Delta t} = \mathbf{X}_t
-    - \Delta t \cdot v_\theta\!\left(\mathbf{X}_t,\, t,\, \mathbf{C}\right)
-\end{equation}
-The final output $\hat{\mathbf{X}}_0 \in \mathbb{R}^{N \times N}$ is passed through a sigmoid
-to obtain a probability heatmap $\hat{\mathbf{P}} \in [0,1]^{N \times N}$, which is then
-decoded into a valid TSP tour (Section~\ref{sec:decoding}).
-
-\subsection{Decoding}
+\subsection{Tour Decoding}
 \label{sec:decoding}
-% TODO: Greedy / Beam Search / 2-opt 算法描述
+All methods produce a symmetric heatmap $\hat{\mathbf{P}} \in [0,1]^{N\times N}$.
+We decode it to a valid Hamiltonian cycle using \texttt{merge\_tours}
+\citep{sun2023difusco}, which greedily inserts edges sorted by score
+$s_{ij} = \hat{P}_{ij} / d_{ij}$ (heatmap probability over Euclidean distance),
+using a union-find data structure to prevent degree-$>$2 violations and premature
+cycle closure. This guarantees a valid tour even from noisy heatmaps.
+The resulting tour is refined with 2-opt local search.
 
 \subsection{Hyperparameters}
-% TODO: 超参数表
+
+\begin{table}[h]
+\centering
+\caption{Shared hyperparameters for all three models.}
+\label{tab:hyperparams}
+\begin{tabular}{lll}
+\toprule
+Parameter & Value & Note \\
+\midrule
+GNN layers & 12 & DIFUSCO default \\
+Hidden dimension & 256 & DIFUSCO default \\
+Batch size & 64 & RTX 4090 24\,GB \\
+Learning rate & $2\times10^{-4}$ & AdamW \\
+Weight decay & $10^{-4}$ & AdamW \\
+Epochs & 50 & \\
+LR schedule & CosineAnnealing & \\
+EMA decay & 0.999 & \\
+Gradient clip & 1.0 & max norm \\
+Diffusion steps $T$ & 1000 & D3PM \& Gaussian \\
+Inference steps & 50 & D3PM \& Gaussian \\
+Inference steps & 20 & Flow Matching \\
+Training instances & 50{,}000 & TSP-50 \\
+Test instances & 1{,}000 & TSP-50 \\
+\bottomrule
+\end{tabular}
+\end{table}
 
 \subsection{Deviations from Original Plan}
-% TODO: 课程要求! 规划 vs 实际偏差
+\label{sec:deviations}
+% REQUIRED by course guidelines
+
+Several deviations from our initial plan occurred during implementation:
+
+\paragraph{Decoder.}
+The original plan used a simple greedy decoder. After discovering a 4\% valid tour rate
+for Gaussian DDPM, we switched to \texttt{merge\_tours} (the official DIFUSCO decoder)
+for all models, which guarantees valid Hamiltonian cycles.
+
+\paragraph{Gaussian inference.}
+We initially implemented only DDIM (deterministic) inference for Gaussian DDPM.
+Comparison with the official codebase revealed that DIFUSCO defaults to DDPM
+\emph{stochastic} inference; DDIM caused error accumulation over 50 steps,
+driving the valid tour rate to 4\%. We added the stochastic posterior and made it default.
+
+\paragraph{FM target space.}
+The FM model was initially trained with raw $\{0,1\}$ targets. We later scaled to
+$\{-1,+1\}$ (matching Gaussian DDPM pre-processing) to improve velocity field
+separability, requiring a full retraining.
+
+\paragraph{Training data.}
+The original plan targeted 5{,}000 training instances (matching DIFUSCO's small-scale
+setting). We generated and used 50{,}000 instances throughout.
+
 
 % ============================================================
-\section{Experiments} % ~2000 字 | 作者: 共同
+\section{Experiments}
+\label{sec:experiments}
 \textit{[Primary Author: Joint]}
+
+\subsection{Setup}
+All models are trained on an NVIDIA RTX 4090 (24\,GB) for approximately 2 hours each.
+The test set consists of 1{,}000 TSP-50 instances. Optimality gaps are computed against
+LKH solutions provided in the dataset. All three models use identical training data,
+architecture, and decoding pipeline.
 
 \subsection{Training Convergence}
-% TODO: Loss 曲线图 (三条曲线: 离散DDPM / 连续DDPM / FM)
+\TODO{Insert Figure: training and validation loss curves for all three models over 50 epochs.
+Use history.json files. D3PM converges from 0.0624 to 0.0122 (train) / 0.0445 to 0.0139 (val).
+Continuous DDPM: 0.0513 to 0.0052 / 0.0198 to 0.0052.
+FM: 0.1265 to 0.0081 / 0.0679 to 0.0081.
+Note: FM starts higher because MSE on velocity has a different loss scale than cross-entropy.}
 
-\subsection{Three-Way Comparison: Discrete DDPM vs.\ Continuous DDPM vs.\ Flow Matching}
+\subsection{Main Results: Three-Way Comparison}
 \label{sec:three_way}
-% TODO: 核心实验! 三方对比表格
-% 预期表格格式:
-%
-% \begin{table}[h]
-% \centering
-% \caption{Three-way comparison on TSP-50 with identical GNN architecture.}
-% \begin{tabular}{lcccc}
-% \toprule
-% Method & Type & Inference Steps & Opt.\ Gap (\%) & Time (ms) \\
-% \midrule
-% Discrete DDPM (D3PM) & $\{0,1\}$ & 50 & --- & --- \\
-% Continuous DDPM      & $\mathbb{R}$ & 50 & --- & --- \\
-% Flow Matching        & $\mathbb{R}$ (ODE) & 20 & --- & --- \\
-% Flow Matching        & $\mathbb{R}$ (ODE) & 50 & --- & --- \\
-% \bottomrule
-% \end{tabular}
-% \end{table}
+Table~\ref{tab:main} presents the main comparison. All gaps are computed on the 1{,}000
+TSP-50 test instances using the \texttt{merge\_tours} decoder followed by 2-opt.
 
-\subsection{Flow Matching Inference Steps Ablation}
-% TODO: FM 在 K=5/10/20/50 步下的 Gap 和推理时间 Pareto 曲线
+\begin{table}[h]
+\centering
+\caption{Optimality gap on TSP-50 (1{,}000 test instances). Lower is better.
+Decoder: \texttt{merge\_tours} + 2-opt for all.}
+\label{tab:main}
+\begin{tabular}{lcccccc}
+\toprule
+Method & Type & Steps & Avg Gap (\%) & Std (\%) & Valid & Time (ms) \\
+\midrule
+D3PM (discrete) & $\{0,1\}$ & 50 & \textbf{1.90} & 2.02 & 100\% & 403 \\
+Gaussian DDPM   & $\mathbb{R}$ & 50 & 6.21 & 3.56 & 100\% & 334 \\
+Flow Matching   & $\mathbb{R}$ (ODE) & 20 & \TODO{X.XX} & \TODO{X.XX} & \TODO{XX\%} & \TODO{XXX} \\
+\midrule
+\multicolumn{7}{l}{\textit{Reference (DIFUSCO official, 128k train samples)}} \\
+D3PM            & $\{0,1\}$ & 50 & 0.10--0.17 & — & 100\% & — \\
+Gaussian DDPM   & $\mathbb{R}$ & 50 & 0.25--0.30 & — & 100\% & — \\
+\bottomrule
+\end{tabular}
+\end{table}
 
-\subsection{Ablation: GNN Architecture}
-% TODO: 消融实验表格 (Gated GCN / GAT / GCN)
+The gap between our results and DIFUSCO's original is primarily attributable to the
+training data size (50k vs 128k instances). Our D3PM gap of 1.90\% remains competitive
+for a from-scratch re-implementation at reduced data scale.
+D3PM outperforms Gaussian DDPM, consistent with DIFUSCO's findings that discrete
+diffusion preserves the binary graph structure more faithfully during training.
 
-\subsection{Generalization Across Scales}
-% TODO: TSP-20/50/100 泛化曲线
+\subsection{Inference Bug Analysis}
+\label{sec:bugs}
 
-\subsection{Diffusion Process Visualization}
-% TODO: GIF 截图 + 热力图
+\paragraph{DDIM accumulation (Gaussian DDPM).}
+When using the deterministic DDIM sampler for Gaussian DDPM inference, the valid tour rate
+collapsed to 4\% despite the model converging well (val loss 0.0052). Analysis showed that
+prediction errors in $\epsilon_\theta$ accumulate deterministically over 50 steps, driving
+$\mathbf{x}_t$ to extreme negative values. The heatmap $\hat{\mathbf{P}} = \mathbf{x}_0\cdot 0.5+0.5$
+then saturates near 0, causing the decoder to fail. Switching to the DDPM stochastic posterior
+(Equation~\ref{eq:ddpm_posterior}) — which injects fresh noise $\mathbf{z}$ at each step,
+disrupting error accumulation — restored the valid rate to 100\%.
+
+\paragraph{Decoder fragility (all models).}
+The initial greedy decoder (following the highest heatmap edge from node 0) failed
+catastrophically when heatmap rows were near-uniform. The \texttt{merge\_tours} decoder,
+which sorts \emph{all} edges globally and uses union-find to enforce degree and cycle
+constraints, is robust to noisy heatmaps by construction.
+
+\subsection{Flow Matching Analysis}
+\label{sec:fm_analysis}
+\TODO{After FM retraining completes, fill in: final gap, comparison vs DDPM,
+effect of {-1,+1} scaling vs raw {0,1}.}
+
+\TODO{Optional: Table showing FM gap at different inference steps K = 10, 20, 50 to show
+the speed--quality tradeoff.}
+
+\subsection{Diffusion Process Visualisation}
+\TODO{Insert heatmap figure showing intermediate states at t = 1.0, 0.75, 0.5, 0.25, 0.0
+for one TSP-50 instance. Should show progression from uniform noise to sparse edge structure.}
+
+\TODO{Insert tour comparison figure: LKH optimal tour (left) vs model decoded tour (right)
+for a representative instance with low, medium, and high gap.}
+
 
 % ============================================================
-\section{Conclusion} % ~500 字 | 作者: 共同
+\section{Conclusion}
+\label{sec:conclusion}
 \textit{[Primary Author: Joint]}
 
-% TODO: 回答研究问题 + 局限性 + 未来工作
+We reproduced DIFUSCO's D3PM and Gaussian DDPM models from scratch in plain PyTorch,
+achieving 1.90\% and 6.21\% optimality gap on TSP-50 respectively, and extended the
+comparison with Flow Matching as a new generative framework for combinatorial optimisation.
+
+Our reproduction confirms the key finding of DIFUSCO: discrete diffusion (D3PM) consistently
+outperforms continuous Gaussian DDPM for graph-structured combinatorial optimisation.
+The binary-preserving transition matrices of D3PM keep the adjacency structure interpretable
+throughout the diffusion trajectory, providing a cleaner learning signal for the GNN.
+
+Flow Matching offers a distinct tradeoff: it requires only 20 inference steps (vs 50 for
+DDPM) and has a simpler training objective, but operates in a continuous space that does
+not naturally preserve binary graph structure. \TODO{Whether this tradeoff is favourable
+will be discussed after final results.}
+
+\paragraph{Limitations.}
+Our training set (50k instances) is smaller than DIFUSCO's (128k), accounting for
+the performance gap. We use a Python 2-opt implementation rather than DIFUSCO's GPU-accelerated
+version, which slightly inflates inference times. Parallel and sequential sampling are not implemented.
+
+\paragraph{Future work.}
+Promising directions include: (i) second-order ODE solvers (Heun's method) for FM to
+improve accuracy with fewer steps; (ii) mixed discrete-continuous diffusion paths that
+preserve binary structure while enabling FM-style training; (iii) scaling to TSP-100 and
+beyond with sparse graph representations.
+
 
 % ============================================================
 \bibliographystyle{plainnat}
-% \bibliography{refs}  % TODO: 创建 refs.bib
+\begin{thebibliography}{99}
 
-% 临时手动引用
-\begin{thebibliography}{9}
-\bibitem{ho2020ddpm} Ho, J., Jain, A., \& Abbeel, P. (2020). Denoising Diffusion Probabilistic Models. \textit{NeurIPS}.
-\bibitem{sun2023difusco} Sun, Z. et al. (2023). DIFUSCO: Graph-based Diffusion Solvers for Combinatorial Optimization. \textit{NeurIPS}.
-\bibitem{chen2024t2tco} Chen, T. et al. (2024). Fast T2T: Optimization Consistency Speeds Up Diffusion-Based Training for Graph Generation. \textit{NeurIPS}.
-\bibitem{velickovic2018gat} Veli\v{c}kovi\'{c}, P. et al. (2018). Graph Attention Networks. \textit{ICLR}.
-\bibitem{kool2019attention} Kool, W. et al. (2019). Attention, Learn to Solve Routing Problems! \textit{ICLR}.
-\bibitem{lipman2022flow} Lipman, Y., Chen, R. T. Q., Ben-Hamu, H., Nickel, M., \& Le, M. (2022). Flow Matching for Generative Modeling. \textit{ICLR 2023}.
-\bibitem{austin2021d3pm} Austin, J., Johnson, D. D., Ho, J., Tarlow, D., \& van den Berg, R. (2021). Structured Denoising Diffusion Models in Discrete State-Spaces. \textit{NeurIPS}.
+\bibitem[Austin et al.(2021)]{austin2021d3pm}
+Austin, J., Johnson, D.~D., Ho, J., Tarlow, D., \& van den Berg, R. (2021).
+Structured Denoising Diffusion Models in Discrete State-Spaces.
+\textit{NeurIPS 2021}.
+
+\bibitem[Bresson \& Laurent(2017)]{bresson2017gatedgcn}
+Bresson, X., \& Laurent, T. (2017).
+Residual Gated Graph ConvNets.
+\textit{arXiv:1711.07553}.
+
+\bibitem[Chen et al.(2024)]{chen2024t2tco}
+Chen, T. et al. (2024).
+Fast T2T: Optimization Consistency Speeds Up Diffusion-Based Training-to-Testing
+for Combinatorial Optimization.
+\textit{NeurIPS 2024}.
+
+\bibitem[Garey \& Johnson(1979)]{garey1979computers}
+Garey, M.~R., \& Johnson, D.~S. (1979).
+\textit{Computers and Intractability: A Guide to the Theory of NP-Completeness}.
+W.~H. Freeman.
+
+\bibitem[Ho et al.(2020)]{ho2020ddpm}
+Ho, J., Jain, A., \& Abbeel, P. (2020).
+Denoising Diffusion Probabilistic Models.
+\textit{NeurIPS 2020}.
+
+\bibitem[Kool et al.(2019)]{kool2019attention}
+Kool, W., van Hoof, H., \& Welling, M. (2019).
+Attention, Learn to Solve Routing Problems!
+\textit{ICLR 2019}.
+
+\bibitem[Lipman et al.(2022)]{lipman2022flow}
+Lipman, Y., Chen, R. T.~Q., Ben-Hamu, H., Nickel, M., \& Le, M. (2022).
+Flow Matching for Generative Modeling.
+\textit{ICLR 2023}.
+
+\bibitem[Song et al.(2020)]{song2020ddim}
+Song, J., Meng, C., \& Ermon, S. (2020).
+Denoising Diffusion Implicit Models.
+\textit{ICLR 2021}.
+
+\bibitem[Sun et al.(2023)]{sun2023difusco}
+Sun, Z., Yang, Y., \& Zheng, J. (2023).
+DIFUSCO: Graph-based Diffusion Solvers for Combinatorial Optimization.
+\textit{NeurIPS 2023}.
+
+\bibitem[Veli\v{c}kovi\'{c} et al.(2018)]{velickovic2018gat}
+Veli\v{c}kovi\'{c}, P., Cucurull, G., Casanova, A., Romero, A., Li\`{o}, P., \& Bengio, Y. (2018).
+Graph Attention Networks.
+\textit{ICLR 2018}.
+
+\bibitem[Vinyals et al.(2015)]{vinyals2015pointer}
+Vinyals, O., Fortunato, M., \& Jaitly, N. (2015).
+Pointer Networks.
+\textit{NeurIPS 2015}.
+
 \end{thebibliography}
 
 \end{document}

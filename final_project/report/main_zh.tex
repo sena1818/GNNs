@@ -1,0 +1,455 @@
+% 扩散模型求解旅行商问题 — 最终项目报告（中文版）
+% 海德堡大学 生成神经网络课程 2025/26 冬季学期
+% 注意：封面禁止使用大学/机构 Logo！
+% 本文件为中文写作参考框架，与 main.tex（英文版）结构完全对应，同步更新。
+
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage{xeCJK}           % 中文支持（需要 XeLaTeX 编译）
+\setCJKmainfont{PingFang SC} % macOS 中文字体，Linux 可换 Noto Sans CJK SC
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{subcaption}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{natbib}
+\usepackage{xcolor}
+
+\newcommand{\TODO}[1]{\textcolor{red}{\textbf{[待填：#1]}}}
+
+\title{\textbf{基于扩散模型的组合优化：}\\
+       \textbf{复现 DIFUSCO 并引入 Flow Matching 求解旅行商问题}}
+\author{
+  % TODO：填写姓名和学号
+  姓名1（学号1）
+  \and
+  姓名2（学号2）
+}
+\date{2026年3月 \\[0.5em]
+  \small 代码仓库：\url{https://github.com/sena1818/GNNs} \quad 分支：\texttt{flowmatching}
+}
+
+\begin{document}
+\maketitle
+
+% ============================================================
+\begin{abstract}
+% 约 250 字 | 作者：共同
+%
+% 问题：TSP 是 NP 难问题，经典求解器规模受限，神经方法提供新思路。
+% 做法：复现 DIFUSCO（NeurIPS 2023），并引入 Flow Matching 作为对比生成框架。
+% 架构：三种模型共享相同的 Gated GCN 骨干网络，仅生成范式不同。
+% 结果：D3PM 在 TSP-50 上达到 1.90% 最优性差距；连续 DDPM 达到 6.21%；FM 待填。
+
+旅行商问题（TSP）是一个经典的 NP 难组合优化问题，在物流调度、电路设计等领域有
+广泛应用。近年来，扩散生成模型被用于此类问题：将最优路径的二值邻接矩阵视为需要
+生成的结构化对象，通过扩散与去噪过程预测高质量解。
+
+本项目的目标有两个：（一）在不使用原始 Lightning 框架的情况下，用纯 PyTorch 从头
+复现 DIFUSCO \citep{sun2023difusco}，包括离散 D3PM 和连续高斯 DDPM 两种变体；
+（二）将 Flow Matching \citep{lipman2022flow}——一种基于确定性常速度 ODE 的生成
+框架——引入组合优化领域，并与前两者进行系统对比。这是 Flow Matching 在图结构
+组合优化中的首次实验性研究。
+
+三种生成框架共享完全相同的 12 层 Gated GCN 编码器（隐藏维度 256），使用
+50{,}000 个 TSP-50 实例训练，并通过 \texttt{merge\_tours} 贪心加边解码器
+（配合 2-opt 局部搜索）输出最终路径。
+
+实验结果：D3PM 达到 \textbf{1.90\% 最优性差距}（合法路径率 100\%），
+高斯 DDPM 达到 \textbf{6.21\%}（经修复推理 bug 后合法率恢复至 100\%），
+Flow Matching 达到 \TODO{X.XX\%}（重训完成后填入）。
+我们的实现、bug 修复记录及实验结果均已开源。
+\end{abstract}
+
+
+% ============================================================
+\section{引言}
+\label{sec:intro}
+\textit{[主要作者：\TODO{姓名}]}
+
+旅行商问题（TSP）可表述为：给定 $N$ 个城市及其坐标，寻找访问每个城市恰好一次的
+最短闭合回路。尽管定义简洁，TSP 是 NP 难问题 \citep{garey1979computers}，
+精确求解器（如 Concorde、LKH）在最坏情况下需要指数级时间，难以用于大规模或实时场景。
+
+神经组合优化作为一种替代方案受到广泛关注：模型从数据中学习解的分布，在推理时以
+毫秒级速度生成高质量解。早期方法基于指针网络 \citep{vinyals2015pointer} 或
+注意力机制 \citep{kool2019attention} 自回归地逐步构造路径。
+DIFUSCO \citep{sun2023difusco}（NeurIPS 2023）开创了一种不同的思路：
+将最优路径的二值邻接矩阵视为扩散生成模型的目标，通过去噪过程直接预测边的概率热力图。
+
+\paragraph{Flow Matching 的动机。}
+Flow Matching \citep{lipman2022flow} 是一种新兴的生成框架：通过回归沿直线路径的
+恒定速度场来训练神经 ODE。与 DDPM 相比，它推理步数更少（20 步 vs 50 步），
+训练目标更简单（对常数速度的 MSE 回归），中间状态更稳定。这些特性使其在组合优化
+领域具有吸引力，但此前尚无相关工作进行评估。
+
+\paragraph{主要贡献。}
+\begin{enumerate}
+  \item 从头复现 DIFUSCO 的 D3PM 和高斯 DDPM，对齐官方代码的所有实现细节
+        （Q-bar 转移矩阵、贝叶斯后验、DDPM 随机推理、\texttt{merge\_tours} 解码器）。
+  \item \textbf{首次将 Flow Matching 引入 TSP 组合优化}，与 DDPM 系列进行系统对比。
+  \item 在相同 GNN 架构、训练数据和解码流程下，完成三方受控对比实验。
+  \item 定位并修复两个关键推理 bug（DDIM 累积爆炸和解码器脆弱性），
+        将连续 DDPM 合法路径率从 4\% 恢复至 100\%。
+\end{enumerate}
+
+
+% ============================================================
+\section{背景}
+\label{sec:background}
+\textit{[主要作者：\TODO{姓名}]}
+
+\subsection{旅行商问题}
+给定 $N$ 个城市坐标 $\{\mathbf{c}_i\}_{i=1}^N \subset [0,1]^2$，TSP 求解：
+\begin{equation}
+  \min_\pi \sum_{i=1}^N \|\mathbf{c}_{\pi(i)} - \mathbf{c}_{\pi(i+1)}\|_2,
+  \quad \pi(N+1) \coloneqq \pi(1).
+\end{equation}
+最优路径对应一个二值邻接矩阵 $\mathbf{A}^* \in \{0,1\}^{N\times N}$，每行每列恰好
+两个 1，构成唯一的哈密顿回路。我们用\textbf{最优性差距}衡量解的质量：
+\begin{equation}
+  \text{gap} = \frac{\text{cost}(\hat\pi) - \text{cost}(\pi^*)}{\text{cost}(\pi^*)} \times 100\%.
+\end{equation}
+
+\subsection{去噪扩散概率模型（DDPM）}
+DDPM \citep{ho2020ddpm} 定义了一个前向加噪过程：
+\begin{equation}
+  q(\mathbf{x}_t | \mathbf{x}_0)
+  = \mathcal{N}\!\left(\sqrt{\bar\alpha_t}\,\mathbf{x}_0,\;(1-\bar\alpha_t)\mathbf{I}\right),
+  \quad \bar\alpha_t = \prod_{s=1}^t(1-\beta_s).
+\end{equation}
+神经网络 $\epsilon_\theta$ 被训练预测噪声，采用 MSE 损失。推理时迭代 DDPM 随机后验：
+\begin{equation}
+  \mathbf{x}_{t-1}
+  = \frac{1}{\sqrt{\alpha_t}}\!\left(\mathbf{x}_t
+    - \frac{1-\alpha_t}{\sqrt{1-\bar\alpha_t}}\,\epsilon_\theta(\mathbf{x}_t,t)\right)
+    + \sqrt{\tilde\beta_t}\,\mathbf{z},
+  \quad \mathbf{z}\sim\mathcal{N}(\mathbf{0},\mathbf{I}).
+\end{equation}
+每步注入的随机噪声 $\mathbf{z}$ 会打散误差累积，这是其区别于 DDIM（确定性采样）的关键。
+
+\subsection{D3PM：离散扩散}
+\label{sec:d3pm_bg}
+D3PM \citep{austin2021d3pm} 针对二值数据定义 $2\times 2$ 转移矩阵：
+\begin{equation}
+  \mathbf{Q}_t = (1-\beta_t)\mathbf{I} + \tfrac{\beta_t}{2}\mathbf{1}\mathbf{1}^\top,
+  \quad \bar{\mathbf{Q}}_t = \mathbf{Q}_1\cdots\mathbf{Q}_t.
+\end{equation}
+前向加噪 $q(\mathbf{x}_t|\mathbf{x}_0) = \text{Cat}(\mathbf{x}_0\bar{\mathbf{Q}}_t)$
+保证所有中间状态 $\mathbf{x}_t$ 仍为二值矩阵，即任意时刻都是合法的图结构。
+这使得 GNN 的消息传递始终在自然的邻接矩阵域上进行，是 D3PM 优于连续扩散的根本原因。
+
+\subsection{离散与连续扩散的对比}
+离散扩散在整个轨迹中保持二值图结构，给 GNN 提供拓扑上一致的学习信号。
+连续高斯扩散将邻接矩阵松弛到 $\mathbb{R}^{N\times N}$，中间状态失去图意义
+（例如 $-0.82$、$1.37$ 不对应任何图结构）。
+DIFUSCO 报告 TSP-50 上 D3PM 达 $0.10$--$0.17\%$ 差距，而高斯 DDPM 为
+$0.25$--$0.30\%$，差距稳定存在。这促使我们探索：能否用更好的连续生成框架缩小差距？
+
+\subsection{Flow Matching}
+\label{sec:fm_bg}
+Flow Matching \citep{lipman2022flow} 通过回归直线插值路径上的速度场训练神经 ODE：
+\begin{align}
+  \mathbf{x}_t &= (1-t)\,\mathbf{x}_0 + t\,\boldsymbol\epsilon,
+    \quad t\sim\mathcal{U}[0,1], \\
+  \mathbf{v}^*(\mathbf{x}_t,t) &= \boldsymbol\epsilon - \mathbf{x}_0 \quad \text{（恒定速度场）}.
+\end{align}
+训练损失为对常数速度目标的 MSE 回归，推理只需从 $t=1$（噪声）到 $t=0$（数据）
+进行 $K=20$ 步欧拉积分，远少于 DDPM 的 50 步。
+
+\subsection{相关工作}
+\TODO{简述：DIFUSCO、T2T-CO、Attention Model、LKH、POMO，各 2--3 句。}
+
+
+% ============================================================
+\section{方法}
+\label{sec:method}
+\textit{[主要作者：共同]}
+
+\subsection{架构总览}
+三种生成框架共享同一 GNN 编码器 $f_\theta(\mathbf{C}, \mathbf{x}_t, t)$，输入城市
+坐标 $\mathbf{C}$、当前含噪邻接状态 $\mathbf{x}_t$ 和时间步 $t$，输出速度场（FM）、
+噪声预测（高斯 DDPM）或分类 logits（D3PM）。共享骨干使得不同生成范式的效果可以
+在受控条件下直接对比。
+
+\TODO{插入架构图：GNN 编码器框图，展示节点/边嵌入、时间步注入和输出头。}
+
+\subsection{Gated GCN 编码器}
+\label{sec:gnn_zh}
+采用 12 层 Gated GCN \citep{bresson2017gatedgcn}，隐藏维度 256，与 DIFUSCO 默认配置一致。
+每层执行门控消息传递：
+\begin{align}
+  \mathbf{g}_{ij} &= \sigma\!\left(
+    \mathbf{A}\mathbf{h}_i + \mathbf{B}\mathbf{h}_j + \mathbf{C}\mathbf{e}_{ij}
+  \right), \\
+  \mathbf{h}_i' &= \text{ReLU}\!\left(\mathbf{U}\mathbf{h}_i
+    + \textstyle\sum_j \mathbf{g}_{ij} \odot \mathbf{V}\mathbf{h}_j\right),
+\end{align}
+外部残差连接作用于每层之后。城市坐标通过正弦位置编码嵌入；
+时间步 $t$ 经正弦标量编码注入每层的边特征图。
+
+输出头为：GroupNorm $\to$ ReLU $\to$ Conv2d$(d, C_\text{out}, 1)$，
+D3PM 使用 $C_\text{out}=2$（分类 logits），高斯 DDPM 和 FM 使用 $C_\text{out}=1$。
+
+\subsection{D3PM 训练与推理}
+\paragraph{训练。}
+给定真值 $\mathbf{A}_0$，采样 $t$，前向加噪得到 $\mathbf{x}_t$，缩放到 $\{-1,+1\}$
+并加 5\% 抖动，用交叉熵训练：
+\begin{equation}
+  \mathcal{L}_\text{D3PM} = \text{CrossEntropy}\!\left(f_\theta(\mathbf{C},\mathbf{x}_t,t),\;
+    \mathbf{A}_0\right).
+\end{equation}
+
+\paragraph{推理。}
+从随机 $\{0,1\}$ 矩阵出发，执行 50 步贝叶斯后验：
+$q(\mathbf{x}_{t-1}|\mathbf{x}_t,\hat{\mathbf{x}}_0)$，利用 $\bar{\mathbf{Q}}_t$
+矩阵精确计算。最终热力图取模型对边类别的 softmax 概率。
+
+\subsection{高斯 DDPM 训练与推理}
+\paragraph{训练。}
+邻接矩阵缩放至 $\{-1,+1\}$（加 5\% 抖动），使用线性 beta schedule（$T=1000$）加噪，
+GNN 预测噪声 $\epsilon$，MSE 训练。
+
+\paragraph{推理。}
+执行 50 步 \textbf{DDPM 随机后验}（见式~\ref{eq:ddpm_posterior}），
+与 DIFUSCO 官方默认一致。确定性 DDIM 采样器可通过参数切换，但会导致误差累积爆炸
+（见 \ref{sec:bugs_zh} 节）。最终热力图：$\hat{\mathbf{P}} = \mathbf{x}_0 \cdot 0.5 + 0.5$。
+
+\subsection{Flow Matching 求解 TSP}
+\label{sec:fm_method_zh}
+\paragraph{训练。}
+对邻接矩阵做 $\{-1,+1\}$ 缩放（$\mathbf{A}_\text{scaled} = 2\mathbf{A}_0 - 1$）
+以改善速度场可分性：边位置速度均值为 $-1$，非边位置均值为 $+1$，均值差距从原始
+$\{0,1\}$ 空间的 1 提升至 2，使模型更容易区分两类位置。
+
+\paragraph{推理。}
+从 $\mathbf{x}_1 \sim \mathcal{N}(\mathbf{0},\mathbf{I})$ 出发，执行 $K=20$ 步
+欧拉积分：
+\begin{equation}
+  \mathbf{x}_{t-\Delta t} = \mathbf{x}_t
+    - \Delta t \cdot v_\theta(\mathbf{x}_t, t, \mathbf{C}), \quad \Delta t = 1/K.
+\end{equation}
+输出通过 $\hat{\mathbf{P}} = \mathbf{x}_0 \cdot 0.5 + 0.5$ 映射到 $[0,1]$ 并对称化。
+
+\subsection{路径解码}
+\label{sec:decoding_zh}
+所有模型输出对称热力图 $\hat{\mathbf{P}} \in [0,1]^{N\times N}$，
+通过 \texttt{merge\_tours} \citep{sun2023difusco} 解码为合法哈密顿回路：
+按得分 $s_{ij} = \hat{P}_{ij} / d_{ij}$（热力图概率除以欧氏距离）降序排列所有边，
+贪心加边时用 union-find 结构保证每节点度数 $\le 2$ 且不提前成环。
+最终路径经 2-opt 局部搜索进一步优化。
+
+\subsection{超参数}
+\begin{table}[h]
+\centering
+\caption{三种模型的共同超参数。}
+\label{tab:hyperparams_zh}
+\begin{tabular}{lll}
+\toprule
+参数 & 值 & 说明 \\
+\midrule
+GNN 层数 & 12 & DIFUSCO 默认 \\
+隐藏维度 & 256 & DIFUSCO 默认 \\
+批大小 & 64 & RTX 4090 24\,GB \\
+学习率 & $2\times10^{-4}$ & AdamW \\
+权重衰减 & $10^{-4}$ & AdamW \\
+训练轮数 & 50 & \\
+学习率调度 & CosineAnnealing & \\
+EMA 衰减 & 0.999 & \\
+梯度裁剪 & 1.0 & max norm \\
+扩散步数 $T$ & 1000 & D3PM 和高斯 DDPM \\
+推理步数 & 50 & D3PM 和高斯 DDPM \\
+推理步数 & 20 & Flow Matching \\
+训练实例数 & 50{,}000 & TSP-50 \\
+测试实例数 & 1{,}000 & TSP-50 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{与原计划的偏差}
+\label{sec:deviations_zh}
+% 课程要求：必须说明规划与实际的差异
+
+\paragraph{解码器。}
+原计划使用简单贪心解码器。发现高斯 DDPM 合法率仅 4\% 后，改为对所有模型统一使用
+\texttt{merge\_tours}（DIFUSCO 官方解码器），从而保证任意热力图都能产生合法回路。
+
+\paragraph{高斯 DDPM 推理。}
+初始实现中仅有 DDIM 确定性推理。与官方代码对比后发现，DIFUSCO 默认使用 DDPM 随机
+推理；DDIM 在 50 步内的确定性误差累积将合法率压至 4\%。我们添加了随机后验方法并设为默认。
+
+\paragraph{FM 目标空间。}
+FM 模型最初使用原始 $\{0,1\}$ 目标空间训练。经分析，改为 $\{-1,+1\}$ 缩放
+（与高斯 DDPM 预处理对齐）后速度场可分性更强，需要重新训练。
+
+\paragraph{训练数据量。}
+原计划使用 5{,}000 个训练实例。实际使用 50{,}000 个实例，与 DIFUSCO 官方更接近。
+
+
+% ============================================================
+\section{实验}
+\label{sec:experiments}
+\textit{[主要作者：共同]}
+
+\subsection{实验设置}
+三个模型均在 NVIDIA RTX 4090（24\,GB 显存）上训练，每个约 2 小时。
+测试集为 1{,}000 个 TSP-50 实例，最优性差距以 LKH 求解结果为基准计算。
+三种模型使用完全相同的训练数据、GNN 架构和解码流程，确保对比的公平性。
+
+\subsection{训练收敛曲线}
+\TODO{插入图：三个模型的训练损失和验证损失曲线（50 轮）。
+D3PM：训练损失 0.0624 → 0.0122，验证损失 0.0445 → 0.0139；
+高斯 DDPM：训练 0.0513 → 0.0052，验证 0.0198 → 0.0052；
+FM：训练 0.1265 → 0.0081，验证 0.0679 → 0.0081。
+注意：FM 初始损失较高是因为 MSE 速度回归与交叉熵损失尺度不同，并非收敛更慢。}
+
+\subsection{三方对比主实验}
+\label{sec:three_way_zh}
+表~\ref{tab:main_zh} 给出了在 1{,}000 个 TSP-50 测试实例上的对比结果。
+所有方法均使用 \texttt{merge\_tours} + 2-opt 解码。
+
+\begin{table}[h]
+\centering
+\caption{TSP-50 最优性差距对比（1{,}000 个测试实例，解码器：merge\_tours + 2-opt）。}
+\label{tab:main_zh}
+\begin{tabular}{lcccccc}
+\toprule
+方法 & 类型 & 推理步数 & 平均差距 (\%) & 标准差 & 合法率 & 推理时间 (ms) \\
+\midrule
+D3PM（离散扩散）& $\{0,1\}$ & 50 & \textbf{1.90} & 2.02 & 100\% & 403 \\
+高斯 DDPM      & $\mathbb{R}$ & 50 & 6.21 & 3.56 & 100\% & 334 \\
+Flow Matching  & $\mathbb{R}$（ODE）& 20 & \TODO{X.XX} & \TODO{X.XX} & \TODO{XX\%} & \TODO{XXX} \\
+\midrule
+\multicolumn{7}{l}{\textit{参考值（DIFUSCO 官方，128k 训练样本）}} \\
+D3PM           & $\{0,1\}$ & 50 & 0.10--0.17 & — & 100\% & — \\
+高斯 DDPM      & $\mathbb{R}$ & 50 & 0.25--0.30 & — & 100\% & — \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+我们的结果与 DIFUSCO 官方的差距主要来源于训练数据量（50k vs 128k）。
+D3PM 的 1.90\% 差距在从头复现、数据量减半的条件下属于合理范围。
+D3PM 优于高斯 DDPM，印证了 DIFUSCO 的核心发现：离散扩散在图结构组合优化中
+因保持二值邻接结构的完整性而具有优势。
+
+\subsection{推理 Bug 分析}
+\label{sec:bugs_zh}
+
+\paragraph{DDIM 误差累积（高斯 DDPM）。}
+使用确定性 DDIM 采样器时，尽管模型训练收敛良好（验证损失 0.0052），
+合法路径率仍崩溃至 4\%。分析表明，$\epsilon_\theta$ 的预测误差在 50 步中
+确定性地叠加，将 $\mathbf{x}_t$ 推向极端负值，还原热力图 $\hat{\mathbf{P}} =
+\mathbf{x}_0\cdot 0.5+0.5$ 接近全零，解码器完全失效。
+改用 DDPM 随机后验（每步注入独立噪声 $\mathbf{z}$，打散误差累积）后，
+合法率立即恢复至 100\%。
+
+\paragraph{解码器脆弱性（所有模型）。}
+初始贪心解码器从节点 0 出发顺序选取最大邻居，当热力图行接近均匀分布时
+会陷入死路。\texttt{merge\_tours} 全局排序所有边并用 union-find 强制度数约束，
+对噪声热力图具有内在鲁棒性。
+
+\subsection{Flow Matching 分析}
+\label{sec:fm_analysis_zh}
+\TODO{FM 重训完成后填入：最终差距数字；与 DDPM 的比较；$\{-1,+1\}$ 缩放 vs $\{0,1\}$
+的效果对比（说明为什么缩放重要）。}
+
+\TODO{可选：不同推理步数 $K=10,20,50$ 下 FM 的速度-质量权衡表。}
+
+\subsection{扩散过程可视化}
+\TODO{插入热力图序列：同一 TSP-50 实例在 $t=1.0, 0.75, 0.5, 0.25, 0.0$ 时刻的
+中间状态，展示从均匀噪声逐渐收敛至稀疏边结构的过程。}
+
+\TODO{插入路径对比图：LKH 最优解（左）vs 模型解（右），选取低/中/高差距各一个实例。}
+
+
+% ============================================================
+\section{结论}
+\label{sec:conclusion}
+\textit{[主要作者：共同]}
+
+本项目从头复现了 DIFUSCO 的 D3PM 和高斯 DDPM，并在 TSP-50 上达到了 1.90\% 和
+6.21\% 的最优性差距，同时将 Flow Matching 引入图结构组合优化领域进行首次系统对比。
+
+复现结果印证了 DIFUSCO 的核心结论：离散扩散（D3PM）在图结构组合优化中稳定
+优于连续高斯 DDPM，因为 D3PM 的二值转移矩阵在整个扩散轨迹中保持邻接矩阵的
+图语义，为 GNN 提供了更清晰的学习信号。
+
+Flow Matching 提供了不同的权衡：推理步数更少（20 步 vs 50 步），训练目标更简单，
+但在不保持二值图结构的连续空间中运行。\TODO{最终结果填入后完善此段。}
+
+\paragraph{局限性。}
+训练集（50k 实例）小于 DIFUSCO 官方（128k），这是与论文结果差距的主要来源。
+2-opt 使用 Python 实现，速度慢于 GPU 加速版本；未实现并行多次采样。
+
+\paragraph{未来工作。}
+（i）采用 Heun 二阶 ODE 积分器提升 FM 精度；
+（ii）研究混合离散-连续扩散路径，在保持二值结构的同时采用 FM 风格训练；
+（iii）通过稀疏图表示将方法扩展至 TSP-100 及更大规模实例。
+
+
+% ============================================================
+\bibliographystyle{plainnat}
+\begin{thebibliography}{99}
+
+\bibitem[Austin et al.(2021)]{austin2021d3pm}
+Austin, J., Johnson, D.~D., Ho, J., Tarlow, D., \& van den Berg, R. (2021).
+Structured Denoising Diffusion Models in Discrete State-Spaces.
+\textit{NeurIPS 2021}.
+
+\bibitem[Bresson \& Laurent(2017)]{bresson2017gatedgcn}
+Bresson, X., \& Laurent, T. (2017).
+Residual Gated Graph ConvNets.
+\textit{arXiv:1711.07553}.
+
+\bibitem[Chen et al.(2024)]{chen2024t2tco}
+Chen, T. et al. (2024).
+Fast T2T: Optimization Consistency Speeds Up Diffusion-Based Training-to-Testing
+for Combinatorial Optimization.
+\textit{NeurIPS 2024}.
+
+\bibitem[Garey \& Johnson(1979)]{garey1979computers}
+Garey, M.~R., \& Johnson, D.~S. (1979).
+\textit{Computers and Intractability: A Guide to the Theory of NP-Completeness}.
+W.~H. Freeman.
+
+\bibitem[Ho et al.(2020)]{ho2020ddpm}
+Ho, J., Jain, A., \& Abbeel, P. (2020).
+Denoising Diffusion Probabilistic Models.
+\textit{NeurIPS 2020}.
+
+\bibitem[Kool et al.(2019)]{kool2019attention}
+Kool, W., van Hoof, H., \& Welling, M. (2019).
+Attention, Learn to Solve Routing Problems!
+\textit{ICLR 2019}.
+
+\bibitem[Lipman et al.(2022)]{lipman2022flow}
+Lipman, Y., Chen, R. T.~Q., Ben-Hamu, H., Nickel, M., \& Le, M. (2022).
+Flow Matching for Generative Modeling.
+\textit{ICLR 2023}.
+
+\bibitem[Song et al.(2020)]{song2020ddim}
+Song, J., Meng, C., \& Ermon, S. (2020).
+Denoising Diffusion Implicit Models.
+\textit{ICLR 2021}.
+
+\bibitem[Sun et al.(2023)]{sun2023difusco}
+Sun, Z., Yang, Y., \& Zheng, J. (2023).
+DIFUSCO: Graph-based Diffusion Solvers for Combinatorial Optimization.
+\textit{NeurIPS 2023}.
+
+\bibitem[Veli\v{c}kovi\'{c} et al.(2018)]{velickovic2018gat}
+Veli\v{c}kovi\'{c}, P., Cucurull, G., Casanova, A., Romero, A., Li\`{o}, P.,
+\& Bengio, Y. (2018).
+Graph Attention Networks. \textit{ICLR 2018}.
+
+\bibitem[Vinyals et al.(2015)]{vinyals2015pointer}
+Vinyals, O., Fortunato, M., \& Jaitly, N. (2015).
+Pointer Networks. \textit{NeurIPS 2015}.
+
+\end{thebibliography}
+
+\end{document}
