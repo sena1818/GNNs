@@ -172,7 +172,9 @@ class TSPDiffusionModel(nn.Module):
             v = self.encoder(coords, x, t_tensor).squeeze(1)
             x = x - dt * v
 
-        heatmap = torch.sigmoid(x)
+        # FM 训练目标 x0=adj_0∈{0,1}，积分后 x≈{0,1}，直接 clamp 保留对比度
+        # sigmoid(0)=0.5, sigmoid(1)=0.73，对比度仅 0.23，远不如 clamp 的 [0,1]
+        heatmap = x.clamp(0, 1)
         heatmap = (heatmap + heatmap.transpose(-1, -2)) / 2.0
         return heatmap
 
@@ -435,7 +437,7 @@ class TSPDiffusionModel(nn.Module):
             v = self.encoder(coords, x, t_tensor).squeeze(1)
             x = x - dt * v
 
-        heatmap = torch.sigmoid(x)
+        heatmap = x.clamp(0, 1)
         heatmap = (heatmap + heatmap.transpose(-1, -2)) / 2.0
         return heatmap
 
