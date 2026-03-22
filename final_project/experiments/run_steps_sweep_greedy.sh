@@ -1,29 +1,25 @@
 #!/bin/bash
-# 实验二：推理步数扫描 — 核心实验
-# 固定训练好的模型，用不同推理步数评估，生成 steps-vs-gap 曲线
+# 实验：推理步数扫描（纯 greedy 解码，不带 2opt）
+# 目的：展示真实的热力图质量随步数的变化，不被 2opt 后处理掩盖
+# 这是论文中最关键的 figure 之一：证明 FM 5步 vs DDPM 需要更多步
 #
 # 用法:
-#   bash experiments/run_steps_sweep.sh              # 默认 TSP-50
-#   bash experiments/run_steps_sweep.sh 20           # TSP-20
+#   bash experiments/run_steps_sweep_greedy.sh
 
 set -e
 cd "$(dirname "$0")/.."
 
-SCALE="${1:-50}"
+SCALE="50"
 ENCODER="gated_gcn"
 TEST_DATA="data/tsp${SCALE}_test.txt"
 RESULTS_DIR="experiments/results"
 mkdir -p "$RESULTS_DIR"
 
-if [ ! -f "$TEST_DATA" ]; then
-    echo "ERROR: $TEST_DATA not found."
-    exit 1
-fi
-
 STEPS_LIST="5 10 20 50 100"
 
 echo "============================================"
-echo " Steps Sweep: inference steps vs gap"
+echo " Steps Sweep (GREEDY ONLY — no 2opt)"
+echo " Purpose: reveal true heatmap quality"
 echo " Scale: TSP-$SCALE"
 echo " Steps: $STEPS_LIST"
 echo "============================================"
@@ -38,13 +34,13 @@ for mode in flow_matching discrete_ddpm continuous_ddpm; do
 
     echo "--- $mode ---"
     for steps in $STEPS_LIST; do
-        echo "  steps=$steps ..."
+        echo "  steps=$steps (greedy) ..."
         python evaluate.py \
             --checkpoint "$CKPT" \
             --data_file "$TEST_DATA" \
             --inference_steps "$steps" \
-            --decode merge --use_2opt \
-            --save_result "$RESULTS_DIR/steps_${mode}_s${steps}.json" \
+            --decode greedy \
+            --save_result "$RESULTS_DIR/steps_greedy_${mode}_s${steps}.json" \
             2>/dev/null
     done
     echo ""
@@ -52,32 +48,32 @@ done
 
 # 汇总表格
 echo "============================================"
-echo " Steps Sweep Results (TSP-$SCALE, merge+2opt)"
+echo " Steps Sweep Results (TSP-$SCALE, GREEDY)"
 echo "============================================"
 printf "%-6s" "Steps"
 for mode in FM D3PM DDPM; do
-    printf "  %-12s" "$mode"
+    printf "  %-14s" "$mode"
 done
 echo ""
 printf "%-6s" "------"
 for _ in FM D3PM DDPM; do
-    printf "  %-12s" "------------"
+    printf "  %-14s" "--------------"
 done
 echo ""
 
 for steps in $STEPS_LIST; do
     printf "%-6s" "$steps"
     for mode in flow_matching discrete_ddpm continuous_ddpm; do
-        f="$RESULTS_DIR/steps_${mode}_s${steps}.json"
+        f="$RESULTS_DIR/steps_greedy_${mode}_s${steps}.json"
         if [ -f "$f" ]; then
-            gap=$(python -c "import json; d=json.load(open('$f')); print(f\"{d['avg_gap']:.2f}%\")")
-            printf "  %-12s" "$gap"
+            info=$(python -c "import json; d=json.load(open('$f')); print(f\"{d['avg_gap']:.2f}% v={d['valid_rate']*100:.0f}%\")")
+            printf "  %-14s" "$info"
         else
-            printf "  %-12s" "N/A"
+            printf "  %-14s" "N/A"
         fi
     done
     echo ""
 done
 
 echo ""
-echo "Done. Plot with: python experiments/plot_results.py --plot steps_sweep"
+echo "Compare with merge+2opt sweep in steps_*.json to see decoder contribution."

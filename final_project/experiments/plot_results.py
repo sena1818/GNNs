@@ -375,7 +375,7 @@ def plot_steps_sweep():
     modes = ['flow_matching', 'discrete_ddpm', 'continuous_ddpm']
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 5.5))
-    fig.suptitle('Inference Steps vs Quality & Speed — TSP-50 (greedy decoder)', fontsize=13)
+    fig.suptitle('Inference Steps vs Quality & Speed — TSP-50 (merge+2opt decoder)', fontsize=13)
 
     for mode in modes:
         gaps_m, times_m, steps_ok = [], [], []
@@ -480,8 +480,8 @@ def plot_decoding_ablation():
 
     # 查找有解码消融数据的模型
     ckpt_dirs_list = [
-        ('flow_matching_gated_gcn', 'FM'),
-        ('discrete_ddpm_gated_gcn', 'D3PM'),
+        ('flow_matching_gated_gcn', 'FM', 'flow_matching'),
+        ('discrete_ddpm_gated_gcn', 'D3PM', 'discrete_ddpm'),
     ]
 
     fig, axes = plt.subplots(1, len(ckpt_dirs_list), figsize=(7 * len(ckpt_dirs_list), 5.5))
@@ -489,7 +489,7 @@ def plot_decoding_ablation():
         axes = [axes]
     fig.suptitle('Decoding Strategy Comparison — TSP-50', fontsize=13)
 
-    for ax_idx, (ckpt_dir, model_label) in enumerate(ckpt_dirs_list):
+    for ax_idx, (ckpt_dir, model_label, mode_key) in enumerate(ckpt_dirs_list):
         ax = axes[ax_idx]
         for dm, dl, mk in zip(decode_methods, decode_labels, markers):
             fpath = os.path.join(RESULTS_DIR, f'{ckpt_dir}_decode_{dm}.json')
@@ -502,6 +502,17 @@ def plot_decoding_ablation():
             ax.annotate(f'{d["avg_gap"]:.1f}%', (d['avg_infer_ms'], d['avg_gap']),
                         textcoords='offset points', xytext=(8, 3), fontsize=8.5)
 
+        # 额外加上 merge+2opt 结果（主实验最优解码器）
+        main_path = os.path.join(RESULTS_DIR, RESULT_FILES[mode_key])
+        if os.path.exists(main_path):
+            with open(main_path) as f:
+                dm_data = json.load(f)
+            ax.scatter(dm_data['avg_infer_ms'], dm_data['avg_gap'], s=200, marker='P',
+                       color='red', label='Merge+2opt ★', zorder=6, edgecolors='white', lw=1.5)
+            ax.annotate(f'{dm_data["avg_gap"]:.1f}%', (dm_data['avg_infer_ms'], dm_data['avg_gap']),
+                        textcoords='offset points', xytext=(8, 3), fontsize=8.5, color='red',
+                        fontweight='bold')
+
         ax.set_xlabel('Avg Inference Time (ms)', fontsize=11)
         ax.set_ylabel('Avg Optimality Gap (%)', fontsize=11)
         ax.set_title(f'{model_label}', fontsize=12)
@@ -513,6 +524,119 @@ def plot_decoding_ablation():
 
 
 # =============================================================================
+# 图9：Greedy Steps Sweep — 纯热力图质量对比（不被 2opt 掩盖）
+# =============================================================================
+
+def plot_steps_sweep_greedy():
+    """Greedy-only steps sweep — 展示真实的热力图质量随步数变化"""
+    steps_list = [5, 10, 20, 50, 100]
+    modes = ['flow_matching', 'discrete_ddpm', 'continuous_ddpm']
+
+    # 检查是否有 greedy 数据
+    has_data = False
+    for mode in modes:
+        fpath = os.path.join(RESULTS_DIR, f'steps_greedy_{mode}_s5.json')
+        if os.path.exists(fpath):
+            has_data = True
+            break
+    if not has_data:
+        print('  ✗  steps_sweep_greedy: no data (run experiments/run_steps_sweep_greedy.sh first)')
+        return
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5.5))
+    fig.suptitle('Steps Sweep: Greedy vs Merge+2opt — Decoder Contribution Analysis', fontsize=13)
+
+    for ax_idx, (prefix, title, ylabel) in enumerate([
+        ('steps_greedy_', 'Greedy Only (raw heatmap quality)', 'Avg Gap (%)'),
+        ('steps_',        'Merge+2opt (with post-processing)', 'Avg Gap (%)'),
+    ]):
+        ax = axes[ax_idx]
+        for mode in modes:
+            gaps_m, steps_ok = [], []
+            for s in steps_list:
+                fpath = os.path.join(RESULTS_DIR, f'{prefix}{mode}_s{s}.json')
+                if os.path.exists(fpath):
+                    with open(fpath) as f:
+                        d = json.load(f)
+                    gaps_m.append(d['avg_gap'])
+                    steps_ok.append(s)
+
+            if not steps_ok:
+                continue
+
+            style = MODE_STYLES[mode]
+            ax.plot(steps_ok, gaps_m, color=style['color'], marker=style['marker'],
+                    label=style['label'], lw=2, markersize=8)
+
+        ax.set_xlabel('Inference Steps', fontsize=12)
+        ax.set_ylabel(ylabel, fontsize=12)
+        ax.set_title(title, fontsize=12)
+        ax.legend(fontsize=9)
+        ax.grid(True, alpha=0.3)
+        ax.set_xscale('log')
+        ax.set_xticks(steps_list)
+        ax.get_xaxis().set_major_formatter(plt.ScalarFormatter())
+
+    plt.tight_layout()
+    _save(fig, '09_steps_sweep_greedy_vs_merge.png')
+
+
+# =============================================================================
+# 图10：Multi-Sample — 采样次数 vs Gap
+# =============================================================================
+
+def plot_multi_sample():
+    """多次采样取最优 — 采样数 vs Gap"""
+    sample_counts = [1, 4, 8, 16]
+    model_configs = [
+        ('d3pm', 'D3PM (10 steps)', MODE_STYLES['discrete_ddpm']),
+        ('ddpm', 'DDPM (50 steps)', MODE_STYLES['continuous_ddpm']),
+        ('fm',   'FM (20 steps)',   MODE_STYLES['flow_matching']),
+    ]
+
+    has_data = False
+    for prefix, _, _ in model_configs:
+        if os.path.exists(os.path.join(RESULTS_DIR, f'multisample_{prefix}_n4.json')):
+            has_data = True
+            break
+    if not has_data:
+        print('  ✗  multi_sample: no data (run experiments/run_multi_sample.sh first)')
+        return
+
+    fig, ax = plt.subplots(figsize=(9, 5.5))
+
+    for prefix, label, style in model_configs:
+        gaps_m, ns_ok = [], []
+        for ns in sample_counts:
+            fpath = os.path.join(RESULTS_DIR, f'multisample_{prefix}_n{ns}.json')
+            if os.path.exists(fpath):
+                with open(fpath) as f:
+                    d = json.load(f)
+                gaps_m.append(d['avg_gap'])
+                ns_ok.append(ns)
+
+        if not ns_ok:
+            continue
+
+        ax.plot(ns_ok, gaps_m, color=style['color'], marker=style['marker'],
+                label=label, lw=2.5, markersize=10)
+
+        for x, y in zip(ns_ok, gaps_m):
+            ax.annotate(f'{y:.2f}%', (x, y), textcoords='offset points',
+                        xytext=(8, 5), fontsize=9, color=style['color'])
+
+    ax.set_xlabel('Number of Samples (take best)', fontsize=12)
+    ax.set_ylabel('Avg Optimality Gap (%)', fontsize=12)
+    ax.set_title('Multi-Sample Inference — TSP-50, merge+2opt', fontsize=13)
+    ax.set_xticks(sample_counts)
+    ax.legend(fontsize=10)
+    ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    _save(fig, '10_multi_sample.png')
+
+
+# =============================================================================
 # 主入口
 # =============================================================================
 
@@ -520,7 +644,8 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Generate report figures from experiment results')
     parser.add_argument('--plot', type=str, default='all',
                         choices=['convergence', 'main', 'speed', 'bugfix', 'distribution',
-                                 'steps_sweep', 'generalization', 'decoding', 'all'],
+                                 'steps_sweep', 'generalization', 'decoding',
+                                 'steps_greedy', 'multi_sample', 'all'],
                         help='Which figure to generate (default: all)')
     args = parser.parse_args()
 
@@ -535,6 +660,8 @@ if __name__ == '__main__':
         'steps_sweep':     plot_steps_sweep,
         'generalization':  plot_generalization,
         'decoding':        plot_decoding_ablation,
+        'steps_greedy':    plot_steps_sweep_greedy,
+        'multi_sample':    plot_multi_sample,
     }
 
     to_run = list(plot_fns.keys()) if args.plot == 'all' else [args.plot]

@@ -86,6 +86,10 @@ def evaluate(args):
     )
     print(f'Dataset: {args.data_file} ({len(dataset)} instances)')
 
+    n_samples = getattr(args, 'n_samples', 1)
+    if n_samples > 1:
+        print(f'Multi-sample mode: {n_samples} samples per instance (take best)')
+
     all_gaps = []
     all_valid = []
     total_infer_time = 0.0
@@ -94,36 +98,51 @@ def evaluate(args):
         coords = coords.to(device)
         B, N, _ = coords.shape
 
-        t_start = time.time()
-        with torch.no_grad():
-            heatmaps = model.sample(coords, inference_steps=inference_steps,
-                                    inference_trick=getattr(args, 'inference_trick', None))
-        total_infer_time += time.time() - t_start
+        best_tours_batch = [None] * B
+        best_lengths_batch = [float('inf')] * B
 
-        if args.decode == 'merge':
-            pred_tours = []
+        t_start = time.time()
+        for sample_idx in range(n_samples):
+            with torch.no_grad():
+                heatmaps = model.sample(coords, inference_steps=inference_steps,
+                                        inference_trick=getattr(args, 'inference_trick', None))
+
+            if args.decode == 'merge':
+                pred_tours = []
+                for i in range(B):
+                    h = heatmaps[i].cpu()
+                    c = coords[i].cpu()
+                    tour = merge_tours(h, c)
+                    if args.use_2opt:
+                        from utils.decode import two_opt_improve
+                        tour = two_opt_improve(tour, c)
+                    pred_tours.append(tour)
+            else:
+                pred_tours = batch_decode(
+                    heatmaps, coords,
+                    method=args.decode,
+                    beam_k=args.beam_k,
+                    use_2opt=args.use_2opt,
+                )
+
+            # 多次采样取最短路径
             for i in range(B):
-                h = heatmaps[i].cpu()
+                pred = pred_tours[i]
                 c = coords[i].cpu()
-                tour = merge_tours(h, c)
-                if args.use_2opt:
-                    from utils.decode import two_opt_improve
-                    tour = two_opt_improve(tour, c)
-                pred_tours.append(tour)
-        else:
-            pred_tours = batch_decode(
-                heatmaps, coords,
-                method=args.decode,
-                beam_k=args.beam_k,
-                use_2opt=args.use_2opt,
-            )
+                if is_valid_tour(pred, N):
+                    length = tour_length(pred, c)
+                    if length < best_lengths_batch[i]:
+                        best_lengths_batch[i] = length
+                        best_tours_batch[i] = pred
+
+        total_infer_time += time.time() - t_start
 
         for i in range(B):
             c    = coords[i].cpu()
-            pred = pred_tours[i]
+            pred = best_tours_batch[i]
             opt  = tours_gt[i].tolist()
 
-            valid = is_valid_tour(pred, N)
+            valid = pred is not None and is_valid_tour(pred, N)
             all_valid.append(valid)
             if valid:
                 gap = compute_gap(pred, opt, c)
@@ -163,6 +182,7 @@ def evaluate(args):
         'encoder_type': encoder_type,
         'decoder': decode_str,
         'inference_steps': inference_steps,
+        'n_samples': n_samples,
         'n_total': n_total,
         'n_valid': n_valid,
         'avg_gap': avg_gap,
@@ -198,6 +218,8 @@ def parse_args():
     p.add_argument('--inference_trick', type=str, default=None,
                    choices=[None, 'ddim'],
                    help='Gaussian 推理模式: None=DDPM随机(默认), ddim=确定性')
+    p.add_argument('--n_samples',   type=int, default=1,
+                   help='Number of parallel samples per instance (take best tour)')
     p.add_argument('--save_result', type=str, default=None)
     return p.parse_args()
 
